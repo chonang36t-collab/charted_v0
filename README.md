@@ -87,3 +87,4 @@ Upload via the Upload page (admin only) and open the Dashboard.
 - Frontend libraries are loaded via CDN for convenience. For offline or no-internet environments, download assets and update `base.html` to point to local files.
 - The SQLite database file is created in `instance/` on first run if not present.
 # charted
+# charted
