@@ -1,0 +1,131 @@
+{% extends 'base.html' %}
+{% block content %}
+<h3>Dashboard</h3>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-3">
+    <label class="form-label">Start date</label>
+    <input type="date" id="start" class="form-control">
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">End date</label>
+    <input type="date" id="end" class="form-control">
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">People</label>
+    <select id="full_names" class="form-select" multiple></select>
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Clients</label>
+    <select id="clients" class="form-select" multiple></select>
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Locations</label>
+    <select id="locations" class="form-select" multiple></select>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4">
+    <div class="card text-bg-light"><div class="card-body"><h5>Total Pay</h5><h3 id="kpi-totalpay">0</h3></div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-bg-light"><div class="card-body"><h5>Paid Hours</h5><h3 id="kpi-hours">0</h3></div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-bg-light"><div class="card-body"><h5>Avg Hour Rate</h5><h3 id="kpi-avgrate">0</h3></div></div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-8">
+    <h5 class="mb-2">Time Series: Total Pay, Client Net, Paid Hours</h5>
+    <div id="ts" style="height:380px;"></div>
+  </div>
+  <div class="col-md-4">
+    <h5 class="mb-2">Paid Hours Distribution</h5>
+    <div id="hours_hist" style="height:380px;"></div>
+  </div>
+  </div>
+<div class="row g-3 mt-3">
+  <div class="col-md-6">
+    <h5 class="mb-2">Top Clients by Total Pay</h5>
+    <div id="top_clients" style="height:360px;"></div>
+  </div>
+  <div class="col-md-6">
+    <h5 class="mb-2">Top Locations by Total Pay</h5>
+    <div id="top_locations" style="height:360px;"></div>
+  </div>
+  </div>
+
+<script>
+async function fetchData() {
+  const params = new URLSearchParams();
+  const start = document.getElementById('start').value;
+  const end = document.getElementById('end').value;
+  const fullNames = Array.from(document.getElementById('full_names').selectedOptions).map(o=>o.value);
+  const clients = Array.from(document.getElementById('clients').selectedOptions).map(o=>o.value);
+  const locations = Array.from(document.getElementById('locations').selectedOptions).map(o=>o.value);
+  if (start) params.append('start', start);
+  if (end) params.append('end', end);
+  for (const n of fullNames) params.append('full_names', n);
+  for (const c of clients) params.append('clients', c);
+  for (const l of locations) params.append('locations', l);
+  const res = await fetch('/api/metrics?' + params.toString());
+  return await res.json();
+}
+
+const fmtCurrency = new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 2 });
+const fmtNumber = new Intl.NumberFormat('en-GB');
+
+async function refresh() {
+  const data = await fetchData();
+  // KPIs
+  document.getElementById('kpi-totalpay').innerText = fmtCurrency.format(data.kpis.total_pay);
+  document.getElementById('kpi-hours').innerText = fmtNumber.format(data.kpis.paid_hours);
+  document.getElementById('kpi-avgrate').innerText = fmtCurrency.format(data.kpis.avg_hour_rate);
+
+  // Filters values
+  const nameSel = document.getElementById('full_names');
+  const clientSel = document.getElementById('clients');
+  const locSel = document.getElementById('locations');
+  if (nameSel.options.length === 0) {
+    for (const n of data.filters.full_names) {
+      const opt = document.createElement('option'); opt.value=n; opt.textContent=n; nameSel.appendChild(opt);
+    }
+  }
+  if (clientSel.options.length === 0) {
+    for (const c of data.filters.clients) {
+      const opt = document.createElement('option'); opt.value=c; opt.textContent=c; clientSel.appendChild(opt);
+    }
+  }
+  if (locSel.options.length === 0) {
+    for (const l of data.filters.locations) {
+      const opt = document.createElement('option'); opt.value=l; opt.textContent=l; locSel.appendChild(opt);
+    }
+  }
+
+  // Time series
+  Plotly.newPlot('ts', [
+    {x:data.timeseries.x, y:data.timeseries.total_pay, name:'Total Pay', type:'scatter', hovertemplate:'£%{y:,.2f}<extra>%{x}</extra>'},
+    {x:data.timeseries.x, y:data.timeseries.client_net, name:'Client Net', type:'scatter', hovertemplate:'£%{y:,.2f}<extra>%{x}</extra>'},
+    {x:data.timeseries.x, y:data.timeseries.paid_hours, name:'Paid Hours', type:'scatter', yaxis:'y2', hovertemplate:'%{y:,.2f} h<extra>%{x}</extra>'}
+  ], {title:'Time Series: Total Pay, Client Net, Paid Hours', margin:{t:40}, legend:{orientation:'h'}, yaxis:{tickprefix:'£', hoverformat:',.2f', title:'GBP'}, yaxis2:{overlaying:'y', side:'right', title:'Hours'}});
+
+  // Hours distribution
+  Plotly.newPlot('hours_hist', [{x:data.hours_distribution.bins, y:data.hours_distribution.counts, type:'bar', name:'Paid Hours', hovertemplate:'%{x:,.2f} h: %{y}<extra></extra>'}], {title:'Paid Hours Distribution', margin:{t:40}, xaxis:{title:'Hours'}, yaxis:{title:'Count'}});
+
+  // Top clients
+  Plotly.newPlot('top_clients', [{x:data.top_clients.labels, y:data.top_clients.values, type:'bar', hovertemplate:'%{x}<br>£%{y:,.2f}<extra></extra>'}], {title:'Top Clients by Total Pay', margin:{t:40}, xaxis:{automargin:true}, yaxis:{tickprefix:'£', hoverformat:',.2f', title:'GBP'}});
+
+  // Top locations
+  Plotly.newPlot('top_locations', [{x:data.top_locations.labels, y:data.top_locations.values, type:'bar', hovertemplate:'%{x}<br>£%{y:,.2f}<extra></extra>'}], {title:'Top Locations by Total Pay', margin:{t:40}, xaxis:{automargin:true}, yaxis:{tickprefix:'£', hoverformat:',.2f', title:'GBP'}});
+}
+
+['start','end','full_names','clients','locations'].forEach(id=>{
+  document.getElementById(id).addEventListener('change', refresh);
+});
+
+refresh();
+</script>
+{% endblock %}
