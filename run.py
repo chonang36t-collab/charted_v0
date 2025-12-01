@@ -1,6 +1,7 @@
-"""CLI runner for Sales Insight.
+"""
+CLI runner for Sales Insight.
 
-Usage examples (Windows-friendly):
+Usage (Windows-friendly):
   python run.py init-db
   python run.py create-admin --username admin --password secret --role admin
   python run.py run --host 0.0.0.0 --port 5000
@@ -14,9 +15,12 @@ import os
 from app import create_app, db
 from app.models import User
 
-
 app = create_app()
 
+
+# -------------------------------------------------
+#  CLI COMMANDS
+# -------------------------------------------------
 
 def cmd_init_db():
     with app.app_context():
@@ -30,11 +34,14 @@ def cmd_create_admin(username: str | None, password: str | None, role: str):
             username = input("Username: ")
         if not password:
             password = getpass.getpass("Password: ")
+
         if role not in {"admin", "viewer"}:
             role = "admin"
+
         if User.query.filter_by(username=username).first():
             print("User already exists.")
             return
+
         user = User(username=username, role=role)
         user.set_password(password)
         db.session.add(user)
@@ -46,11 +53,15 @@ def cmd_run(host: str, port: int):
     app.run(host=host, port=port, debug=False)
 
 
+# -------------------------------------------------
+#  MAIN EXECUTION
+# -------------------------------------------------
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sales Insight CLI")
     sub = parser.add_subparsers(dest="command")
 
-    p_init = sub.add_parser("init-db")
+    sub.add_parser("init-db")
 
     p_admin = sub.add_parser("create-admin")
     p_admin.add_argument("--username")
@@ -62,6 +73,7 @@ if __name__ == "__main__":
     p_run.add_argument("--port", type=int, default=5000)
 
     args = parser.parse_args()
+
     if args.command == "init-db":
         cmd_init_db()
     elif args.command == "create-admin":

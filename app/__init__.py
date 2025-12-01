@@ -1,8 +1,4 @@
-"""Flask application factory for Sales Insight.
-
-Loads configuration from .env, initializes extensions (SQLAlchemy, LoginManager),
-registers blueprints, and ensures the instance folder exists for SQLite DB.
-"""
+"""Flask application factory for Sales Insight."""
 from __future__ import annotations
 
 import os
@@ -10,22 +6,28 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
+from flask import Flask, send_from_directory
 from flask_login import LoginManager
+from flask_caching import Cache
 
-# Extensions
+# Import db from models to avoid circular imports
+from .models import db, User
 
-db = SQLAlchemy()
+# Initialize cache
+cache = Cache()
+
 login_manager = LoginManager()
 login_manager.login_view = "auth.login"
 login_manager.login_message_category = "warning"
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
 
 
 def create_app(test_config: Optional[dict] = None) -> Flask:
     """Application factory."""
     # Load environment variables
-    # Project root is the parent of the app/ directory
     env_path = Path(__file__).resolve().parents[1] / ".env"
     if env_path.exists():
         load_dotenv(env_path)
@@ -40,30 +42,19 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
 
     # Default config
     secret_key = os.getenv("SECRET_KEY", os.urandom(24).hex())
-    # Prefer DATABASE_URL from .env, fallback to instance sqlite
+    
     database_url = os.getenv("DATABASE_URL")
+    
     if not database_url:
-        db_path = Path(app.instance_path) / "sales_data.db"
-        database_url = f"sqlite:///{db_path}"
-    else:
-        # If sqlite path is relative (e.g., sqlite:///instance/sales_data.db),
-        # convert to absolute to avoid OS-dependent resolution issues.
-        if database_url.startswith("sqlite///") or database_url.startswith("sqlite:///"):
-            prefix = "sqlite:///"
-            if database_url.startswith("sqlite///"):
-                prefix = "sqlite///"  # keep as-is; just normalize path below
-            path_part = database_url[len("sqlite:///"):]
-            if not os.path.isabs(path_part):
-                project_root = Path(__file__).resolve().parents[1]
-                abs_path = os.path.abspath(project_root / path_part)
-                # Normalize to forward slashes for SQLAlchemy URI
-                database_url = f"sqlite:///{abs_path.replace(os.sep, '/')}"
+        # Fallback to PostgreSQL with default credentials
+        database_url = "postgresql://postgres:admin123@localhost:5432/sales_insight"
+        print("  Using default PostgreSQL connection. Set DATABASE_URL in .env for production.")
 
     app.config.from_mapping(
         SECRET_KEY=secret_key,
-        SQLALCHEMY_DATABASE_URI=database_url,
+        SQLALCHEMY_DATABASE_URI=database_url,  # This now points to PostgreSQL
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        UPLOAD_MAX_CONTENT_LENGTH=25 * 1024 * 1024,  # 25 MB
+        UPLOAD_MAX_CONTENT_LENGTH=25 * 1024 * 1024,
         ALLOWED_EXTENSIONS={"xlsx"},
     )
 
@@ -76,15 +67,42 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
     # Init extensions
     db.init_app(app)
     login_manager.init_app(app)
+    cache.init_app(app, config={
+        'CACHE_TYPE': 'SimpleCache',
+        'CACHE_DEFAULT_TIMEOUT': 300  # 5 minutes
+    })
 
     # Import models so they are registered
     from . import models  # noqa: F401
 
+    # Create tables
+    with app.app_context():
+        try:
+            db.create_all()
+            print(" PostgreSQL database tables created/verified")
+        except Exception as e:
+            print(f" Error creating tables: {e}")
+            # Don't raise here to see the full error
+
     # Blueprints
     from .auth import auth_bp
     from .routes import main_bp
+    from .blueprints.advanced_reports import advanced_reports_bp
+    from .blueprints.upload import upload_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
+    app.register_blueprint(advanced_reports_bp)
+    app.register_blueprint(upload_bp, url_prefix='/api')
+
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def serve_react(path: str):
+        file_path = os.path.join(app.static_folder, path)
+
+        if path != "" and os.path.exists(file_path):
+            return send_from_directory(app.static_folder, path)
+
+        return send_from_directory(app.static_folder, "index.html")
 
     return app

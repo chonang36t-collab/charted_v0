@@ -6,15 +6,74 @@
     <title>Sales Insight</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.35.2/plotly.min.js"></script>
+    <style>
+      :root{
+        --brand-accent:#c584aa;
+        --brand-light:#e6dee6;
+        --brand-muted:#b0b9c9;
+        --brand-600:#52618a;
+        --brand-500:#667899;
+        --brand-400:#6c83a4;
+        --brand-700:#3b547d; /* primary */
+      }
+      /* Typography */
+      html{ font-size: 12px; }
+      body{ font-family: 'Aptos New', 'Segoe UI', Roboto, Arial, sans-serif; }
+      /* Navbar styling */
+      .navbar.brand-navbar{
+        background: var(--brand-700) !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,.2);
+      }
+      .brand-navbar .navbar-brand{
+        color: var(--brand-light) !important;
+        font-weight: 600;
+        letter-spacing: .3px;
+      }
+      .brand-navbar .nav-link{
+        color: var(--brand-light) !important;
+        opacity: .9;
+      }
+      .brand-navbar .nav-link:hover,
+      .brand-navbar .nav-link:focus{
+        color: #fff !important;
+        opacity: 1;
+      }
+      .brand-navbar .nav-link.active{
+        color: #fff !important;
+        border-bottom: 2px solid var(--brand-accent);
+      }
+      .brand-navbar .navbar-text{ color: var(--brand-light) !important; }
+      .brand-navbar .btn-outline-light{ border-color: var(--brand-light); color: var(--brand-light); }
+      .brand-navbar .btn-outline-light:hover{ background: var(--brand-light); color: var(--brand-700); }
+      /* Buttons and badges */
+      .btn-primary{ background-color: var(--brand-accent); border-color: var(--brand-accent); }
+      .btn-primary:hover{ background-color: #b7749a; border-color: #b7749a; }
+      .badge.bg-primary{ background-color: var(--brand-400) !important; }
+      /* Links */
+      a{ color: var(--brand-400); }
+      a:hover{ color: var(--brand-500); }
+      /* Flash messages */
+      .alert a{ color: inherit; text-decoration: underline; }
+      /* Align right-side navbar items */
+      .navbar-nav.ms-auto{ align-items: center; }
+      .navbar-text.nav-user{ display: inline-flex; align-items: center; padding: .5rem .5rem; }
+      /* Page background subtle tint */
+      body{ background: linear-gradient(180deg, #f8f9fb 0%, #ffffff 100%); }
+    </style>
   </head>
   <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <nav class="navbar navbar-expand-lg navbar-dark brand-navbar sticky-top">
       <div class="container-fluid">
-        <a class="navbar-brand" href="{{ url_for('main.dashboard') }}">Sales Insight</a>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"><span class="navbar-toggler-icon"></span></button>
+        <a class="navbar-brand" href="{{ url_for('main.dashboard') }}">36T Insight</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
         <div class="collapse navbar-collapse" id="navbarNav">
           <ul class="navbar-nav me-auto mb-2 mb-lg-0">
             <li class="nav-item"><a class="nav-link" href="{{ url_for('main.dashboard') }}">Dashboard</a></li>
+            {% if current_user.is_authenticated %}
+            <li class="nav-item"><a class="nav-link" href="{{ url_for('advanced_reports.reports_page') }}">Advanced Reports</a></li>
+            {% endif %}
             {% if current_user.is_authenticated and current_user.is_admin %}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('main.upload') }}">Upload</a></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('auth.manage_users') }}">Users</a></li>
@@ -22,7 +81,7 @@
           </ul>
           <ul class="navbar-nav ms-auto">
             {% if current_user.is_authenticated %}
-            <li class="nav-item"><span class="navbar-text me-2">Hello, {{ current_user.username }}</span></li>
+            <li class="nav-item"><span class="navbar-text nav-user me-2">Hello, {{ current_user.username }}</span></li>
             <li class="nav-item"><a class="nav-link" href="{{ url_for('auth.logout') }}">Logout</a></li>
             {% else %}
             <li class="nav-item"><a class="nav-link" href="{{ url_for('auth.login') }}">Login</a></li>

@@ -1,0 +1,143 @@
+{% extends 'base.html' %}
+{% block content %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<div class="wrapper mx-4">
+
+  <h3 class="text-xl font-semibold mb-4">Advanced Reports</h3>
+
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+    <div>
+      <label class="block text-sm font-medium mb-1">Chart Type</label>
+      <select id="chartType" class="w-full border rounded p-2">
+        <option value="bar">Bar</option>
+        <option value="line">Line</option>
+        <option value="pie">Pie</option>
+        <option value="scatter">Scatter</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">X-axis</label>
+      <select id="x" class="w-full border rounded p-2"></select>
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Y-axis</label>
+      <select id="y" class="w-full border rounded p-2"></select>
+    </div>
+    <div class="flex items-end">
+      <button id="genBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white rounded p-2">Generate Report</button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    <div>
+      <label class="block text-sm font-medium mb-1">Site (optional)</label>
+      <input id="site" class="w-full border rounded p-2" placeholder="e.g., Heathrow" />
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Role (optional)</label>
+      <input id="role" class="w-full border rounded p-2" placeholder="e.g., Sales" />
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1">Month (optional)</label>
+      <input id="month" class="w-full border rounded p-2" placeholder="e.g., 2025-01" />
+    </div>
+  </div>
+
+  <div class="bg-white rounded shadow p-4">
+    <canvas id="reportChart" height="120"></canvas>
+  </div>
+</div>
+
+<script>
+  const state = { chart: null, cols: { numeric: [], categorical: [] } };
+
+  // Unique RGB colors per item based on label hashing
+  function hslToRgbString(h, s, l){
+    s/=100; l/=100;
+    const k = n => (n + h/30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)));
+    const r = Math.round(255 * f(0));
+    const g = Math.round(255 * f(8));
+    const b = Math.round(255 * f(4));
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  function hashToHue(str){
+    let h = 0;
+    for (let i=0;i<str.length;i++){ h = (h*31 + str.charCodeAt(i)) >>> 0; }
+    return h % 360;
+  }
+  function colorForLabel(label, s=70, l=55){
+    return hslToRgbString(hashToHue(String(label)), s, l);
+  }
+  function colorsFromLabels(labels){ return labels.map(l => colorForLabel(l)); }
+
+  async function loadColumns() {
+    const res = await fetch('/api/reports/columns');
+    const data = await res.json();
+    state.cols = data;
+    const xSel = document.getElementById('x');
+    const ySel = document.getElementById('y');
+    // X can be categorical or date, Y must be numeric
+    for (const c of [...data.categorical, ...data.numeric]) {
+      const opt = document.createElement('option'); opt.value = c; opt.textContent = c; xSel.appendChild(opt);
+    }
+    for (const n of data.numeric) {
+      const opt = document.createElement('option'); opt.value = n; opt.textContent = n; ySel.appendChild(opt);
+    }
+    // Defaults
+    if (xSel.options.length) xSel.value = 'date';
+    if (ySel.options.length) ySel.value = 'total_pay';
+  }
+
+  function buildConfig(chartType, labels, values, label) {
+    const data = {
+      labels,
+      datasets: [{
+        label: label || y.value,
+        data: values,
+        backgroundColor: (chartType === 'pie' || chartType === 'bar') ? colorsFromLabels(labels) : colorsFromLabels(labels),
+        borderColor: (chartType === 'pie' || chartType === 'bar') ? colorsFromLabels(labels) : colorsFromLabels(labels),
+        pointBackgroundColor: (chartType === 'line' || chartType === 'scatter') ? colorsFromLabels(labels) : undefined,
+        pointBorderColor: (chartType === 'line' || chartType === 'scatter') ? colorsFromLabels(labels) : undefined,
+        fill: chartType === 'line' ? false : true,
+      }]
+    };
+    const options = {
+      responsive: true,
+      plugins: { legend: { position: 'top' }, title: { display: false } },
+      scales: {
+        y: { beginAtZero: true }
+      }
+    };
+    return { type: chartType, data, options };
+  }
+
+  async function generateReport() {
+    const chartType = document.getElementById('chartType').value;
+    const x = document.getElementById('x').value;
+    const y = document.getElementById('y').value;
+    const site = document.getElementById('site').value.trim();
+    const role = document.getElementById('role').value.trim();
+    const month = document.getElementById('month').value.trim();
+
+    const params = new URLSearchParams({ chartType, x, y });
+    if (site) params.append('site', site);
+    if (role) params.append('role', role);
+    if (month) params.append('month', month);
+
+    const res = await fetch('/api/reports/data?' + params.toString());
+    const payload = await res.json();
+    if (payload.error) { alert(payload.error); return; }
+
+    const cfg = buildConfig(chartType, payload.labels, payload.values, `${y} by ${x}`);
+    const ctx = document.getElementById('reportChart').getContext('2d');
+    if (state.chart) { state.chart.destroy(); }
+    state.chart = new Chart(ctx, cfg);
+  }
+
+  document.getElementById('genBtn').addEventListener('click', generateReport);
+  loadColumns();
+</script>
+{% endblock %}

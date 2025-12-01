@@ -1,0 +1,19 @@
+[2025-11-23 11:42:51,617] ERROR in routes: Error in sales-summary API: The "whens" argument to case(), when referring to a sequence of items, is now passed as a series of positional elements, rather than as a list. 
+ PostgreSQL database tables created/verified
+Fact Record: ID=1, DateID=20230101, Revenue=1000.0
+Login Status: 200
+DEBUG SQL: SELECT sum(fact_shifts.client_net) AS total_revenue, sum(fact_shifts.total_pay) AS total_cost, count(DISTINCT fact_shifts.client_id) AS total_clients, count(fact_shifts.shift_record_id) AS total_shifts, count(DISTINCT fact_shifts.employee_id) AS unique_employees 
+FROM fact_shifts JOIN dim_dates ON fact_shifts.date_id = dim_dates.date_id
+DEBUG RESULT: (1000.0, 800.0, 1, 1, 1)
+API Status: 200
+API Data: {"monthlyRevenue":[],"profitMargin":0.0,"totalClients":0,"totalCost":0.0,"totalRevenue":0.0,"totalShifts":0,"uniqueEmployees":0}
+
+Revenue: 0.0 (Type: <class 'float'>)
+Cost: 0.0 (Type: <class 'float'>)
+Shifts: 0 (Type: <class 'int'>)
+Traceback (most recent call last):
+  File "C:\Users\ChonangRai\Documents\data-vis\charted\tests\test_dashboard_api.py", line 83, in <module>
+    test_api_sales_summary()
+  File "C:\Users\ChonangRai\Documents\data-vis\charted\tests\test_dashboard_api.py", line 70, in test_api_sales_summary
+    assert data['totalRevenue'] == 1000.0
+AssertionError

@@ -1,0 +1,13 @@
+ PostgreSQL database tables created/verified
+Fact Record: ID=1, DateID=20230101, Revenue=1000.0
+Total Facts in DB: 1
+  Fact: ID=1, DateID=20230101, Pay=800.0
+Total Dates in DB: 1
+  Date: ID=20230101, Date=2023-01-01
+Traceback (most recent call last):
+  File "C:\Users\ChonangRai\Documents\data-vis\charted\tests\test_dashboard_api.py", line 105, in <module>
+    test_api_sales_summary()
+  File "C:\Users\ChonangRai\Documents\data-vis\charted\tests\test_dashboard_api.py", line 70, in test_api_sales_summary
+    func.count(FactShift.shift_record_id)
+    ^^^^
+UnboundLocalError: cannot access local variable 'func' where it is not associated with a value
