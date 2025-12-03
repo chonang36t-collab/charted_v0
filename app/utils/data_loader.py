@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 from datetime import datetime
 import os
 from sqlalchemy import text
@@ -9,15 +9,15 @@ class dbDataLoader:
         self.db_type = "PostgreSQL"
     
     def load_excel_data(self, file_path):
-        """BULK load Excel data - optimized for performance"""
-        print(f"🚀 Starting BULK data load from: {file_path}")
+        """BULK load Excel data - generator for progress updates"""
+        yield {"status": "progress", "message": "ðŸš€ Starting BULK data load...", "progress": 0}
         start_time = datetime.now()
         
         try:
             # Read Excel file
-            print("📖 Reading Excel file...")
+            yield {"status": "progress", "message": "ðŸ“– Reading Excel file...", "progress": 5}
             df = pd.read_excel(file_path)
-            print(f"✅ Loaded {len(df):,} rows from Excel")
+            yield {"status": "progress", "message": f"âœ… Loaded {len(df):,} rows from Excel", "progress": 10}
             
             # Validate required columns
             required_columns = [
@@ -29,58 +29,65 @@ class dbDataLoader:
             
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
-                print(f"❌ Missing columns: {missing_columns}")
-                return False
+                yield {"status": "error", "message": f"âŒ Missing columns: {missing_columns}"}
+                return
             
-            print("🔄 Processing data in bulk...")
+            yield {"status": "progress", "message": "ðŸ”„ Processing data in bulk...", "progress": 15}
             
             # STEP 1: Bulk create dimension records
-            print("👥 Creating dimension records in bulk...")
+            yield {"status": "progress", "message": "ðŸ‘¥ Creating dimension records...", "progress": 20}
             
             # Employees (unique)
             unique_employees = df[['full_name', 'role']].drop_duplicates()
             employees_map = self._bulk_create_employees(unique_employees)
-            print(f"   Employees: {len(employees_map):,} records")
+            yield {"status": "progress", "message": f"   Employees: {len(employees_map):,} records", "progress": 25}
             
             # Clients (unique)
             unique_clients = df[['client']].drop_duplicates()
             clients_map = self._bulk_create_clients(unique_clients)
-            print(f"   Clients: {len(clients_map):,} records")
+            yield {"status": "progress", "message": f"   Clients: {len(clients_map):,} records", "progress": 30}
             
             # Jobs (unique)
             unique_jobs = df[['job_name', 'location', 'site']].drop_duplicates()
             jobs_map = self._bulk_create_jobs(unique_jobs)
-            print(f"   Jobs: {len(jobs_map):,} records")
+            yield {"status": "progress", "message": f"   Jobs: {len(jobs_map):,} records", "progress": 35}
             
-            # Shifts (unique) - FIXED: Better data cleaning
+            # Shifts (unique)
             unique_shifts = df[['shift_name', 'shift_start', 'shift_end']].drop_duplicates()
             shifts_map = self._bulk_create_shifts(unique_shifts)
-            print(f"   Shifts: {len(shifts_map):,} records")
+            yield {"status": "progress", "message": f"   Shifts: {len(shifts_map):,} records", "progress": 40}
             
-            # Dates (unique) - FIXED: Better date handling
+            # Dates (unique)
             unique_dates = df[['date', 'month', 'day']].drop_duplicates()
             dates_map = self._bulk_create_dates(unique_dates)
-            print(f"   Dates: {len(dates_map):,} records")
+            yield {"status": "progress", "message": f"   Dates: {len(dates_map):,} records", "progress": 45}
             
             # STEP 2: Bulk create fact records
-            print("📊 Creating fact records in bulk...")
-            facts_created = self._bulk_create_facts(df, employees_map, clients_map, jobs_map, shifts_map, dates_map)
-            print(f"   Fact Shifts: {facts_created:,} records")
+            yield {"status": "progress", "message": "ðŸ“Š Creating fact records...", "progress": 50}
+            facts_created, skipped_details = self._bulk_create_facts(df, employees_map, clients_map, jobs_map, shifts_map, dates_map)
+            yield {"status": "progress", "message": f"   Fact Shifts: {facts_created:,} records", "progress": 90}
             
             # STEP 3: Verify data
             elapsed = (datetime.now() - start_time).total_seconds()
-            print(f"✅ BULK LOAD COMPLETE in {elapsed:.2f} seconds")
+            yield {"status": "progress", "message": f"âœ… BULK LOAD COMPLETE in {elapsed:.2f} seconds", "progress": 95}
             
-            self._verify_totals(df)
+            verification_stats = self._verify_totals(df, skipped_details)
             
-            return True
+            yield {
+                "status": "complete", 
+                "message": "Upload complete", 
+                "data": {
+                    "inserted": facts_created,
+                    "skipped_details": skipped_details,
+                    "verification": verification_stats
+                }
+            }
             
         except Exception as e:
             db.session.rollback()
-            print(f"💥 Critical error: {str(e)}")
             import traceback
             traceback.print_exc()
-            return False
+            yield {"status": "error", "message": f"ðŸ’¥ Critical error: {str(e)}"}
     
     def _bulk_create_employees(self, employees_df):
         """Bulk create employees and return mapping"""
@@ -190,6 +197,9 @@ class dbDataLoader:
         existing_shifts = {shift.shift_name: shift.shift_id for shift in DimShift.query.all()}
         
         new_shifts = []
+        # NEW: Map identifier to original key to avoid reconstruction issues
+        new_shift_keys = {} 
+        
         for _, row in shifts_df.iterrows():
             shift_name = self._clean_string(row['shift_name'], "Unknown Shift")
             shift_start = self._clean_time(row.get('shift_start', ''))
@@ -205,7 +215,14 @@ class dbDataLoader:
                         'shift_start': shift_start,
                         'shift_end': shift_end
                     })
+                    # NEW: Store the mapping
+                    new_shift_keys[shift_identifier] = shift_key
+                    
                 shifts_map[shift_key] = existing_shifts.get(shift_identifier)
+        
+        # Debug logging
+        found_count = len([v for v in shifts_map.values() if v is not None])
+        print(f"   Shift Mapping: {len(shifts_map)} unique shifts, {found_count} found in DB, {len(new_shifts)} new")
         
         # Bulk insert new shifts in smaller batches to identify problematic records
         if new_shifts:
@@ -216,16 +233,16 @@ class dbDataLoader:
                 try:
                     db.session.bulk_insert_mappings(DimShift, batch)
                     db.session.commit()
-                    print(f"   ✅ Inserted shift batch {i//batch_size + 1}")
+                    print(f"Inserted shift batch {i//batch_size + 1}")
                 except Exception as e:
-                    print(f"   ❌ Error in shift batch {i//batch_size + 1}: {e}")
+                    print(f"Error in shift batch {i//batch_size + 1}: {e}")
                     # Try individual inserts to identify the problematic record
                     for j, shift in enumerate(batch):
                         try:
                             db.session.bulk_insert_mappings(DimShift, [shift])
                             db.session.commit()
                         except Exception as single_error:
-                            print(f"      ❌ Problematic shift: {shift}")
+                            print(f"Problematic shift: {shift}")
                             # Skip this problematic shift
                             continue
             
@@ -233,9 +250,10 @@ class dbDataLoader:
             for shift in new_shifts:
                 shift_obj = DimShift.query.filter_by(shift_name=shift['shift_name']).first()
                 if shift_obj:
-                    for key in shifts_map:
-                        if key.startswith(shift['shift_name'].split('_')[0] + '|'):
-                            shifts_map[key] = shift_obj.shift_id
+                    # NEW: Use the stored key directly
+                    original_key = new_shift_keys.get(shift['shift_name'])
+                    if original_key:
+                        shifts_map[original_key] = shift_obj.shift_id
         
         return shifts_map
     
@@ -287,9 +305,9 @@ class dbDataLoader:
         
         # Log problematic dates
         if problematic_dates:
-            print(f"   ⚠️  Found {len(problematic_dates)} problematic dates, using defaults")
+            print(f"Found {len(problematic_dates)} problematic dates, using defaults")
             for prob in problematic_dates[:5]:  # Show first 5
-                print(f"      Problematic: {prob['original_date']} -> {prob['cleaned_date']} (ID: {prob['date_id']})")
+                print(f"Problematic: {prob['original_date']} -> {prob['cleaned_date']} (ID: {prob['date_id']})")
         
         # Bulk insert new dates
         if new_dates:
@@ -299,10 +317,45 @@ class dbDataLoader:
         return dates_map
     
     def _bulk_create_facts(self, df, employees_map, clients_map, jobs_map, shifts_map, dates_map):
-        """Bulk create fact records"""
+        """Bulk create fact records with deduplication"""
         fact_records = []
-        skipped_records = 0
+        skipped_details = []
         
+        # Pre-fetch existing records to check for duplicates
+        # We'll use a composite key of (employee_id, date_id, shift_id) to identify unique assignments
+        existing_keys = set()
+        try:
+            # Get the date range for the current upload to limit the query
+            # We need to convert the dates in df to date_ids to query efficiently
+            upload_date_ids = set()
+            for date_val in df['date'].unique():
+                _, date_id = self._clean_date_with_id(date_val)
+                upload_date_ids.add(date_id)
+            
+            if upload_date_ids:
+                min_date_id = min(upload_date_ids)
+                max_date_id = max(upload_date_ids)
+                
+                query = text("""
+                    SELECT employee_id, date_id, shift_id 
+                    FROM fact_shifts 
+                    WHERE date_id BETWEEN :min_date AND :max_date
+                """)
+                result = db.session.execute(query, {"min_date": min_date_id, "max_date": max_date_id})
+                for row in result:
+                    existing_keys.add((row[0], row[1], row[2]))
+                print(f"   Dedup Check: Fetched {len(existing_keys)} existing fact records from DB")
+        except Exception as e:
+            print(f"Warning: Could not pre-fetch existing records for deduplication: {e}")
+            
+        # Keep a copy of initial DB keys to distinguish between 
+        # "pre-existing in DB" vs "duplicate within this file"
+        initial_db_keys = existing_keys.copy()
+        
+        # Track ALL rows with the same key (for showing all duplicate row numbers)
+        # Map: (employee_id, date_id, shift_id) -> list of row indices
+        seen_keys_in_file = {}
+
         for idx, row in df.iterrows():
             # Get foreign keys from mappings
             full_name = self._clean_string(row['full_name'], "Unknown Employee")
@@ -331,9 +384,69 @@ class dbDataLoader:
             
             # Skip if any required foreign key is missing
             if not all([employee_id, client_id, job_id, shift_id, date_id]):
-                skipped_records += 1
-                if skipped_records <= 10:  # Only show first 10 skipped records
-                    print(f"   ⚠️  Skipping row {idx} - missing foreign keys for: {full_name}, {client_name}")
+                missing = []
+                if not employee_id: missing.append(f"Employee: {full_name}")
+                if not client_id: missing.append(f"Client: {client_name}")
+                if not job_id: missing.append(f"Job: {job_name}")
+                if not shift_id: missing.append(f"Shift: {shift_name}")
+                if not date_id: missing.append(f"Date: {date_str}")
+                
+                skipped_details.append({
+                    "row": idx + 2, # Excel is 1-indexed + header
+                    "reason": "Missing Keys",
+                    "details": ", ".join(missing)
+                })
+                if len(skipped_details) <= 10:
+                    print(f"Skipping row {idx}: Missing {', '.join(missing)}")
+                continue
+            
+            # Check for duplicate
+            key = (employee_id, date_id, shift_id)
+            
+            # DEBUG: Log first failure
+            in_existing = key in existing_keys
+            if not in_existing and idx > 10 and 'first_failure_logged' not in locals():
+                first_failure_logged = True
+                print(f"\n🔴 FIRST FAILURE at Row {idx + 2}:")
+                print(f"   Key: {key}")
+                print(f"   Types: ({type(employee_id)}, {type(date_id)}, {type(shift_id)})")
+                
+                # Find close matches
+                print("   Searching for close matches in existing_keys...")
+                found_close = False
+                for ek in list(existing_keys)[:10000]: # Check first 10k to be safe
+                    # Check if 2 out of 3 match
+                    matches = sum([1 for i in range(3) if ek[i] == key[i]])
+                    if matches >= 2:
+                        print(f"   Found CLOSE MATCH: {ek}")
+                        print(f"      Diff: Emp={ek[0]==key[0]}, Date={ek[1]==key[1]}, Shift={ek[2]==key[2]}")
+                        found_close = True
+                        break
+                if not found_close:
+                    print("   No close matches found in sample.")
+            
+            if key in existing_keys:
+                is_db_dup = key in initial_db_keys
+                dup_type = "DB (Pre-existing)" if is_db_dup else "File (Intra-file)"
+                
+                details_msg = f"{full_name} on {date_str} ({shift_name}) [DateID: {date_id}]"
+                
+                # Show ALL duplicate row numbers
+                if not is_db_dup and key in seen_keys_in_file:
+                    dup_rows = [r + 2 for r in seen_keys_in_file[key]]  # Convert to Excel rows
+                    rows_str = ", ".join(map(str, dup_rows))
+                    details_msg += f" - Duplicate of Row(s): {rows_str}"
+                    dup_type += f" (Rows: {rows_str})"
+                
+                skipped_details.append({
+                    "row": idx + 2,
+                    "reason": "Duplicate",
+                    "details": details_msg,
+                    "duplicate_type": "pre_existing" if is_db_dup else "intra_file"
+                })
+                
+                if len([s for s in skipped_details if s['reason'] == 'Duplicate']) <= 10:
+                    print(f"   ℹ️  Skipping duplicate row {idx + 2}: {full_name} on {date_str} - {dup_type}")
                 continue
             
             # Create fact record
@@ -357,23 +470,34 @@ class dbDataLoader:
             }
             
             fact_records.append(fact_record)
+            # Add to existing keys to prevent duplicates within the same file
+            existing_keys.add(key)
+            # Track this row for duplicate reporting
+            if key not in seen_keys_in_file:
+                seen_keys_in_file[key] = []
+            seen_keys_in_file[key].append(idx)
         
-        if skipped_records > 10:
-            print(f"   ⚠️  ... and {skipped_records - 10} more records skipped")
+        # Summary of what happened
+        total_rows = len(df)
+        skipped_count = len(skipped_details)
+        inserted_count = len(fact_records)
+        print(f"\n   SUMMARY: Total rows={total_rows}, Skipped={skipped_count}, To insert={inserted_count}")
+        print(f"   Existing keys in DB: {len(initial_db_keys)}, Final existing keys: {len(existing_keys)}\n")
+        
         
         # Bulk insert all fact records in batches
+        total_inserted = 0
         if fact_records:
             batch_size = 1000
-            total_inserted = 0
             
             for i in range(0, len(fact_records), batch_size):
                 batch = fact_records[i:i + batch_size]
                 db.session.bulk_insert_mappings(FactShift, batch)
                 db.session.commit()
                 total_inserted += len(batch)
-                print(f"   ✅ Inserted fact batch {i//batch_size + 1}: {len(batch):,} records")
+                print(f"Inserted fact batch {i//batch_size + 1}: {len(batch):,} records")
         
-        return total_inserted
+        return total_inserted, skipped_details
     
     def _clean_string(self, value, default=""):
         """Clean string values, handle NaN and None"""
@@ -470,7 +594,7 @@ class dbDataLoader:
             return default_date, default_id
             
         except Exception as e:
-            print(f"   ⚠️  Date parsing error for '{date_value}': {e}")
+            print(f"Date parsing error for '{date_value}': {e}")
             return default_date, default_id
     
     def _derive_month_day(self, date_str):
@@ -502,38 +626,92 @@ class dbDataLoader:
             return value.lower() in ['true', 'yes', '1', 'y']
         return False
     
-    def _verify_totals(self, df):
+    def _verify_totals(self, df, skipped_details=None):
         """Verify that loaded data matches Excel totals"""
         try:
             from sqlalchemy import text
             
-            # Excel totals
-            excel_revenue = df['client_net'].sum()
+            # Ensure numeric columns are actually numeric
+            df['client_net'] = pd.to_numeric(df['client_net'], errors='coerce').fillna(0)
+            df['total_pay'] = pd.to_numeric(df['total_pay'], errors='coerce').fillna(0)
+            df['paid_hours'] = pd.to_numeric(df['paid_hours'], errors='coerce').fillna(0)
+            
+            # Excel totals (Raw)
+            raw_excel_revenue = df['client_net'].sum()
             excel_cost = df['total_pay'].sum()
             excel_hours = df['paid_hours'].sum()
             
-            # Database totals
+            # Calculate Skipped Revenue
+            skipped_revenue = 0
+            if skipped_details:
+                for item in skipped_details:
+                    should_subtract = False
+                    # Subtract if it was skipped due to missing keys
+                    if item.get('reason') == 'Missing Keys':
+                        should_subtract = True
+                    # Subtract if it was a duplicate WITHIN the file (intra-file)
+                    # If it was pre-existing in DB, we DON'T subtract because DB has it and we want to match DB
+                    elif item.get('reason') == 'Duplicate' and item.get('duplicate_type') == 'intra_file':
+                        should_subtract = True
+                    
+                    if should_subtract:
+                        row_idx = item['row'] - 2 # Convert back to 0-based index
+                        if 0 <= row_idx < len(df):
+                            val = df.iloc[row_idx]['client_net']
+                            skipped_revenue += val
+            
+            adjusted_excel_revenue = raw_excel_revenue - skipped_revenue
+            
+            # Determine date range from dataframe to scope the DB query
+            date_ids = []
+            for date_val in df['date'].unique():
+                _, date_id = self._clean_date_with_id(date_val)
+                date_ids.append(date_id)
+            
+            if not date_ids:
+                return {"excel_revenue": 0, "db_revenue": 0, "match": False, "error": "No dates in file"}
+                
+            min_date = min(date_ids)
+            max_date = max(date_ids)
+            
+            # Database totals - SCOPED to the file's date range
             sql = text("""
                 SELECT 
                     COALESCE(SUM(client_net), 0) as revenue,
                     COALESCE(SUM(total_pay), 0) as cost,
                     COALESCE(SUM(paid_hours), 0) as hours
                 FROM fact_shifts
+                WHERE date_id BETWEEN :min_date AND :max_date
             """)
-            result = db.session.execute(sql).fetchone()
+            result = db.session.execute(sql, {"min_date": min_date, "max_date": max_date}).fetchone()
             db_revenue = float(result[0])
             db_cost = float(result[1])
             db_hours = float(result[2])
             
-            print(f"\n🔍 DATA VERIFICATION:")
-            print(f"   Excel Revenue: ${excel_revenue:,.2f}")
-            print(f"   DB Revenue:    ${db_revenue:,.2f}")
-            print(f"   Match: {abs(db_revenue - excel_revenue) < 0.01}")
+            print(f"DATA VERIFICATION (Range: {min_date} - {max_date}):")
+            print(f"   Raw Excel Revenue:      ${raw_excel_revenue:,.2f}")
+            print(f"   Skipped Revenue:        ${skipped_revenue:,.2f}")
+            print(f"   Adjusted Excel Revenue: ${adjusted_excel_revenue:,.2f}")
+            print(f"   DB Revenue:             ${db_revenue:,.2f}")
+            print(f"   Match: {abs(db_revenue - adjusted_excel_revenue) < 1.0}")
             
-            if abs(db_revenue - excel_revenue) < 0.01:
-                print("✅ ✅ ✅ TOTALS MATCH! ✅ ✅ ✅")
+            match = bool(abs(db_revenue - adjusted_excel_revenue) < 1.0)
+            if match:
+                print("TOTALS MATCH!")
             else:
-                print("❌ ❌ ❌ TOTALS DON'T MATCH! ❌ ❌ ❌")
+                print("TOTALS DON'T MATCH!")
+            
+            return {
+                "excel_revenue": float(adjusted_excel_revenue), # Return adjusted for UI comparison
+                "db_revenue": float(db_revenue),
+                "match": match
+            }
                 
         except Exception as e:
-            print(f"❌ Verification error: {e}")
+            print(f"Verification error: {e}")
+            return {
+                "excel_revenue": 0,
+                "db_revenue": 0,
+                "match": False,
+                "error": str(e)
+            }

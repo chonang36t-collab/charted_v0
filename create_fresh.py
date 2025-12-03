@@ -9,12 +9,12 @@ def clear_all_data():
     app = create_app()
     
     with app.app_context():
-        print("🗑️  CLEARING ALL DATA (Except Users)")
+        print("CLEARING ALL DATA (Except Users)")
         print("=" * 50)
         
         try:
             # Get counts before deletion
-            print("📊 CURRENT DATA COUNTS:")
+            print("CURRENT DATA COUNTS:")
             models = {
                 'FactShifts': FactShift,
                 'DimEmployees': DimEmployee, 
@@ -29,44 +29,44 @@ def clear_all_data():
                 print(f"   {name}: {count} records")
             
             # Confirm deletion
-            response = input("\n❓ Are you sure you want to delete all data? (yes/no): ")
+            response = input("Are you sure you want to delete all data? (yes/no): ")
             if response.lower() != 'yes':
-                print("❌ Operation cancelled.")
+                print("Operation cancelled.")
                 return
             
-            print("\n🔄 Deleting data...")
+            print("Deleting data...")
             
             # Delete in correct order to respect foreign keys
             db.session.query(FactShift).delete()
-            print("✅ Deleted FactShifts")
+            print("Deleted FactShifts")
             
             db.session.query(DimShift).delete()
-            print("✅ Deleted DimShifts")
+            print("Deleted DimShifts")
             
             db.session.query(DimDate).delete()
-            print("✅ Deleted DimDates")
+            print("Deleted DimDates")
             
             db.session.query(DimJob).delete()
-            print("✅ Deleted DimJobs")
+            print("Deleted DimJobs")
             
             db.session.query(DimEmployee).delete()
-            print("✅ Deleted DimEmployees")
+            print("Deleted DimEmployees")
             
             db.session.query(DimClient).delete()
-            print("✅ Deleted DimClients")
+            print("Deleted DimClients")
             
             db.session.commit()
-            print("\n🎉 All data cleared successfully!")
+            print("All data cleared successfully!")
             
             # Verify counts after deletion
-            print("\n📊 FINAL DATA COUNTS:")
+            print("FINAL DATA COUNTS:")
             for name, model in models.items():
                 count = db.session.query(model).count()
                 print(f"   {name}: {count} records")
                 
         except Exception as e:
             db.session.rollback()
-            print(f"❌ Error clearing data: {e}")
+            print(f"Error clearing data: {e}")
             import traceback
             traceback.print_exc()
 

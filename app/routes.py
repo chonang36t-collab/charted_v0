@@ -51,36 +51,29 @@ def api_upload():
     if ext not in current_app.config.get("ALLOWED_EXTENSIONS", {"xlsx"}):
         return jsonify({"error": "Only .xlsx files are allowed."}), 400
 
-    try:
-        import tempfile
-        import os
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-            file.save(tmp_file.name)
-            tmp_path = tmp_file.name
+    import tempfile
+    import os
+    import json
+    from flask import Response, stream_with_context
+    
+    # Save file temporarily
+    fd, tmp_path = tempfile.mkstemp(suffix='.xlsx')
+    os.close(fd)
+    file.save(tmp_path)
 
-        loader = dbDataLoader()
-        success = loader.load_excel_data(tmp_path)
-        
-        os.unlink(tmp_path)
-        
-        if success:
-            return jsonify({
-                "message": "Upload complete.",
-                "details": {
-                    "inserted": "Data processed successfully",
-                    "duplicates": 0,
-                    "skipped": 0,
-                },
-            })
-        else:
-            return jsonify({"error": "Failed to process data"}), 500
-            
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as e:
-        current_app.logger.exception("Upload failed")
-        return jsonify({"error": f"Unexpected error during upload: {str(e)}"}), 500
+    def generate():
+        try:
+            loader = dbDataLoader()
+            # Iterate over the generator from data_loader
+            for progress_data in loader.load_excel_data(tmp_path):
+                yield json.dumps(progress_data) + '\n'
+        except Exception as e:
+            yield json.dumps({"status": "error", "message": str(e)}) + '\n'
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
 
 @main_bp.route("/api/metrics")
 @login_required
