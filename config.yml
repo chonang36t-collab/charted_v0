@@ -1,0 +1,7 @@
+tunnel: access-pass-hub
+credentials-file: C:\Users\ChonangRai\.cloudflared\1a84d177-7f37-4944-99e6-c6ae424042de.json
+
+ingress:
+  - hostname: analytics.36t-hub.uk
+    service: http://localhost:5000
+  - service: http_status:404

@@ -13,6 +13,7 @@ class User(UserMixin, db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), default='user')
+    location = db.Column(db.String(200), nullable=True)  # For manager location assignment
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def __repr__(self):
@@ -114,3 +115,15 @@ class FactShift(db.Model):
     job_status = db.Column(db.String(50))
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class PayBandSettings(db.Model):
+    __tablename__ = 'pay_band_settings'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    premium_threshold = db.Column(db.Float, default=14.0)  # £14+/hour
+    standard_threshold = db.Column(db.Float, default=13.0)  # £13-14/hour
+    basic_threshold = db.Column(db.Float, default=12.0)    # £12-13/hour
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<PayBandSettings premium={self.premium_threshold}, standard={self.standard_threshold}, basic={self.basic_threshold}>'

@@ -14,12 +14,12 @@ from flask import (
     jsonify,
     request,
 )
-from flask_login import login_required
-from sqlalchemy import func, case
+from flask_login import login_required, current_user
+from sqlalchemy import func, case, desc
 
 from . import db
 from .models import FactShift, DimClient, DimDate
-from .auth import admin_required
+from .auth import admin_required, manager_required
 from .models import FactShift, DimEmployee, DimClient, DimJob, DimDate, DimShift
 from .utils.data_loader import dbDataLoader
 
@@ -74,6 +74,17 @@ def api_upload():
                 os.unlink(tmp_path)
 
     return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
+
+@main_bp.route("/api/locations")
+@login_required
+def api_get_locations():
+    """Get unique list of job locations"""
+    try:
+        locations = db.session.query(DimJob.location).distinct().all()
+        return jsonify([loc[0] for loc in locations if loc[0]])
+    except Exception as e:
+        current_app.logger.error(f"Error fetching locations: {e}")
+        return jsonify([]), 500
 
 @main_bp.route("/api/metrics")
 @login_required
@@ -163,7 +174,8 @@ def api_sales_summary_totals():
             DimDate.date >= start,
             DimDate.date <= end
         )
-        
+        # Apply role-based location filtering
+        current_totals_query = apply_location_filter(current_totals_query)
         current_totals = current_totals_query.first()
         
         # Previous period totals
@@ -319,7 +331,6 @@ def api_sales_summary_timeseries():
 
 @main_bp.route("/api/sales-summary")
 @login_required
-@cache.cached(timeout=300, query_string=True)
 def api_sales_summary_combined():
     """Combined endpoint that calls both totals and timeseries"""
     try:
@@ -352,6 +363,8 @@ def api_sales_summary_combined():
             DimDate.date <= end
         )
         
+        # Apply role-based location filtering
+        current_totals_query = apply_dashboard_filters(current_totals_query)
         current_totals = current_totals_query.first()
         
         # Previous period totals
@@ -371,25 +384,47 @@ def api_sales_summary_combined():
             DimDate.date >= previous_start.strftime('%Y-%m-%d'),
             DimDate.date <= previous_end.strftime('%Y-%m-%d')
         )
+        
+        # Apply role-based location filtering
+        previous_totals_query = apply_dashboard_filters(previous_totals_query)
         previous_totals = previous_totals_query.first()
         
-        # Calculate metrics for current period
-        current_revenue = float(current_totals[0] or 0)
-        current_cost = float(current_totals[1] or 0)
-        current_paid_hours = float(current_totals[5] or 0)
-        
-        current_profit_margin = ((current_revenue - current_cost) / current_revenue * 100) if current_revenue > 0 else 0
-        current_avg_client_pay = (current_revenue / current_paid_hours) if current_paid_hours > 0 else 0
-        current_avg_staff_pay = (current_cost / current_paid_hours) if current_paid_hours > 0 else 0
-        
-        # Calculate metrics for previous period
-        previous_revenue = float(previous_totals[0] or 0)
-        previous_cost = float(previous_totals[1] or 0)
-        previous_paid_hours = float(previous_totals[5] or 0)
-        
-        previous_profit_margin = ((previous_revenue - previous_cost) / previous_revenue * 100) if previous_revenue > 0 else 0
-        previous_avg_client_pay = (previous_revenue / previous_paid_hours) if previous_paid_hours > 0 else 0
-        previous_avg_staff_pay = (previous_cost / previous_paid_hours) if previous_paid_hours > 0 else 0
+        if current_user.role != 'admin':
+             # Sanitize ONLY financial metrics for non-admin roles
+             # But keep operational metrics (clients, shifts, employees, hours)
+             current_revenue = 0.0
+             current_cost = 0.0
+             current_profit_margin = 0.0
+             current_avg_client_pay = 0.0
+             current_avg_staff_pay = 0.0
+             
+             # Extract operational data
+             current_paid_hours = float(current_totals[5] or 0)
+             
+             previous_revenue = 0.0
+             previous_cost = 0.0
+             previous_profit_margin = 0.0
+             previous_avg_client_pay = 0.0
+             previous_avg_staff_pay = 0.0
+             previous_paid_hours = float(previous_totals[5] or 0)
+        else:
+             # Calculate metrics for current period
+             current_revenue = float(current_totals[0] or 0)
+             current_cost = float(current_totals[1] or 0)
+             current_paid_hours = float(current_totals[5] or 0)
+             
+             current_profit_margin = ((current_revenue - current_cost) / current_revenue * 100) if current_revenue > 0 else 0
+             current_avg_client_pay = (current_revenue / current_paid_hours) if current_paid_hours > 0 else 0
+             current_avg_staff_pay = (current_cost / current_paid_hours) if current_paid_hours > 0 else 0
+             
+             # Calculate metrics for previous period
+             previous_revenue = float(previous_totals[0] or 0)
+             previous_cost = float(previous_totals[1] or 0)
+             previous_paid_hours = float(previous_totals[5] or 0)
+             
+             previous_profit_margin = ((previous_revenue - previous_cost) / previous_revenue * 100) if previous_revenue > 0 else 0
+             previous_avg_client_pay = (previous_revenue / previous_paid_hours) if previous_paid_hours > 0 else 0
+             previous_avg_staff_pay = (previous_cost / previous_paid_hours) if previous_paid_hours > 0 else 0
         
         # Time series data
         if days_diff > 180:
@@ -409,13 +444,18 @@ def api_sales_summary_combined():
             period_format.label('period'),
             period_display.label('display'),
             func.sum(FactShift.client_net).label('revenue'),
-            func.sum(FactShift.total_pay).label('cost')
+            func.sum(FactShift.total_pay).label('cost'),
+            func.sum(FactShift.paid_hours).label('paid_hours'),
+            func.count(FactShift.shift_record_id).label('shifts')
         ).join(DimDate, FactShift.date_id == DimDate.date_id)
         
         time_series_query = time_series_query.filter(
             DimDate.date >= start,
             DimDate.date <= end
         )
+        
+        # Apply role-based location filtering
+        time_series_query = apply_dashboard_filters(time_series_query)
         
         if aggregation_level == "daily":
             time_series_results = time_series_query.group_by(DimDate.date, period_display).order_by(DimDate.date).all()
@@ -426,10 +466,12 @@ def api_sales_summary_combined():
             {
                 "period": str(period),
                 "display": display,
-                "revenue": round(float(revenue or 0), 2),
-                "cost": round(float(cost or 0), 2)
+                "revenue": round(float(revenue or 0), 2) if current_user.role == 'admin' else 0.0,
+                "cost": round(float(cost or 0), 2) if current_user.role == 'admin' else 0.0,
+                "paidHours": round(float(paid_hours or 0), 2),
+                "totalShifts": int(shifts or 0)
             }
-            for period, display, revenue, cost in time_series_results
+            for period, display, revenue, cost, paid_hours, shifts in time_series_results
         ]
         
         # Build final response
@@ -477,7 +519,107 @@ def api_sales_summary_combined():
             "aggregationLevel": "daily"
         })
         
-# Helper functions
+def apply_dashboard_filters(query):
+    """
+    Unified utility to apply location and site filtering based on user role 
+    and requested filters (from query parameters).
+    """
+    requested_clients = request.args.getlist("clients")
+    requested_locations = request.args.getlist("locations")
+    requested_sites = request.args.getlist("sites")
+    
+    # Helper to check if DimJob is already joined
+    def is_dim_job_joined(q):
+        try:
+            for join in q._setup_joins:
+                if hasattr(join[0], 'mapper') and join[0].mapper.class_ == DimJob:
+                    return True
+            for desc in q.column_descriptions:
+                if desc.get('entity') == DimJob or (hasattr(desc.get('type'), 'mapper') and desc.get('type').mapper.class_ == DimJob):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def ensure_dim_job(q):
+        if not is_dim_job_joined(q):
+            return q.join(DimJob, FactShift.job_id == DimJob.job_id)
+        return q
+
+    def is_dim_client_joined(q):
+        try:
+            for join in q._setup_joins:
+                if hasattr(join[0], 'mapper') and join[0].mapper.class_ == DimClient:
+                    return True
+            for desc in q.column_descriptions:
+                if desc.get('entity') == DimClient or (hasattr(desc.get('type'), 'mapper') and desc.get('type').mapper.class_ == DimClient):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def ensure_dim_client(q):
+        if not is_dim_client_joined(q):
+            return q.join(DimClient, FactShift.client_id == DimClient.client_id)
+        return q
+
+    # 0. Handle Client Filtering
+    if requested_clients:
+        query = ensure_dim_client(query)
+        query = query.filter(DimClient.client_name.in_(requested_clients))
+
+    # 1. Handle Location Filtering
+    if current_user.role == 'admin':
+        if requested_locations:
+            query = ensure_dim_job(query)
+            query = query.filter(DimJob.location.in_(requested_locations))
+    else:
+        # Non-admins: Security intersection
+        import json
+        user_locations = json.loads(current_user.location) if current_user.location else []
+        
+        if not user_locations:
+            return query.filter(text("1=0"))
+        
+        query = ensure_dim_job(query)
+        
+        if requested_locations:
+            # Only allow requested locations that are assigned to the user
+            # Support partial matching (e.g. "LHR" matches "LHR - London Heathrow")
+            target_locations = []
+            for req in requested_locations:
+                if any(u in req or req in u for u in user_locations):
+                    target_locations.append(req)
+            
+            if not target_locations:
+                return query.filter(text("1=0"))
+            query = query.filter(DimJob.location.in_(target_locations))
+        else:
+            # Default: show all user locations
+            from sqlalchemy import or_
+            filters = [DimJob.location.like(f"{loc}%") for loc in user_locations]
+            query = query.filter(or_(*filters))
+
+    # 2. Handle Site Filtering (already within selected/allowed locations)
+    if requested_sites:
+        query = ensure_dim_job(query)
+        query = query.filter(DimJob.site.in_(requested_sites))
+        
+    return query
+
+@main_bp.route("/api/financial-summary")
+@login_required
+@admin_required
+def api_financial_summary():
+    """Admin-only summary with full financial data"""
+    return api_sales_summary_combined()
+
+@main_bp.route("/api/operational-summary")
+@login_required
+def api_operational_summary():
+    """Operational summary for managers and viewers (location-filtered)"""
+    # This currently reuses sales_summary but will be filtered by location
+    return api_sales_summary_combined()
 def _to_dataframe(query) -> pd.DataFrame:
     rows = query.all()
     if not rows:
@@ -592,27 +734,58 @@ def summary_stats(df):
 @main_bp.route("/api/filters")
 @login_required
 def api_filters():
-    """Get available filters (clients, locations, sites)"""
+    """Get available filters (clients, locations, sites) with associations"""
     try:
         # Get all clients
         clients = [c.client_name for c in DimClient.query.with_entities(DimClient.client_name).distinct().order_by(DimClient.client_name).all()]
         
-        # Get locations and their sites
-        jobs = DimJob.query.with_entities(DimJob.location, DimJob.site).distinct().all()
+        # Get associations between locations, sites, and clients
+        # We query FactShift joined with DimJob and DimClient to get real-world associations
+        associations_query = db.session.query(
+            DimJob.location, 
+            DimJob.site,
+            DimClient.client_name
+        ).join(
+            FactShift, FactShift.job_id == DimJob.job_id
+        ).join(
+            DimClient, FactShift.client_id == DimClient.client_id
+        )
+        
+        # Apply role-based filtering
+        associations_query = apply_dashboard_filters(associations_query)
+        associations = associations_query.distinct().all()
         
         locations_map = {}
-        for loc, site in jobs:
-            if loc:
-                if loc not in locations_map:
-                    locations_map[loc] = set()
-                if site:
-                    locations_map[loc].add(site)
+        for loc, site, client in associations:
+            if not loc:
+                continue
+            if loc not in locations_map:
+                locations_map[loc] = {"sites": set(), "clients": set()}
+            if site:
+                locations_map[loc]["sites"].add(site)
+            # Filter clients as well? For now, we just map what's visible
+            if client:
+                locations_map[loc]["clients"].add(client)
         
+        # Add locations that might not have data yet but exist in DimJob
+        all_jobs_query = db.session.query(DimJob.location, DimJob.site)
+        all_jobs_query = apply_dashboard_filters(all_jobs_query)
+        all_jobs = all_jobs_query.distinct().all()
+        
+        for loc, site in all_jobs:
+            if not loc:
+                continue
+            if loc not in locations_map:
+                locations_map[loc] = {"sites": set(), "clients": set()}
+            if site:
+                locations_map[loc]["sites"].add(site)
+
         locations_data = []
         for loc in sorted(locations_map.keys()):
             locations_data.append({
                 "name": loc,
-                "sites": sorted(list(locations_map[loc]))
+                "sites": sorted(list(locations_map[loc]["sites"])),
+                "clients": sorted(list(locations_map[loc]["clients"]))
             })
             
         return jsonify({
@@ -634,19 +807,20 @@ def api_chart_data():
         dimension = request.args.get("dimension", "").lower()
         metrics = [m.lower() for m in request.args.getlist("metrics")]
         
-        # Filter parameters
-        filter_clients = request.args.getlist("clients")
-        filter_locations = request.args.getlist("locations")
-        filter_sites = request.args.getlist("sites")
-
         if not start or not end or not dimension or not metrics:
             return jsonify({"error": "Missing required parameters"}), 400
 
+        # Security check: Non-admins cannot access financial metrics
+        if current_user.role != 'admin':
+            financial_metrics = {'revenue', 'cost', 'profit', 'profit_margin', 'avg_bill_rate', 'avg_pay_rate'}
+            if any(m in financial_metrics for m in metrics):
+                 return jsonify({"error": "Access denied: Financial metrics are restricted to administrators."}), 403
+
         # Map dimension to model column
         dim_map = {
-            "date": DimDate.date,
-            "month": DimDate.month,
-            "year": DimDate.year,
+            "date": func.to_char(func.cast(DimDate.date, db.Date), 'YYYY-MM-DD'),
+            "month": func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY'),
+            "year": func.cast(DimDate.year, db.String),
             "client_name": DimClient.client_name,
             "full_name": DimEmployee.full_name,
             "role": DimEmployee.role,
@@ -682,17 +856,25 @@ def api_chart_data():
         if not valid_metrics:
             return jsonify({"error": "No valid metrics provided"}), 400
 
+        split_by_location = request.args.get("split_by_location", "").lower() == "true"
+        split_by_site = request.args.get("split_by_site", "").lower() == "true"
+
         dim_col = dim_map[dimension]
         metric_cols = [metric_map[m].label(m) for m in valid_metrics]
 
-        query = db.session.query(
-            dim_col.label("name"),
-            *metric_cols
-        ).join(
+        query_cols = [dim_col.label("name")]
+        if split_by_location:
+            query_cols.append(DimJob.location.label("location"))
+        if split_by_site:
+            query_cols.append(DimJob.site.label("site"))
+        
+        query_cols.extend(metric_cols)
+
+        query = db.session.query(*query_cols).join(
             DimDate, FactShift.date_id == DimDate.date_id
         )
 
-        # Join other tables if needed for dimensions OR filters
+        # Join other tables if needed for dimensions
         joined_tables = set()
         
         # Helper to join table if not already joined
@@ -707,35 +889,68 @@ def api_chart_data():
             ensure_join(DimClient, FactShift.client_id == DimClient.client_id)
         elif dimension in ["full_name", "role"]:
             ensure_join(DimEmployee, FactShift.employee_id == DimEmployee.employee_id)
-        elif dimension in ["job_name", "location"]:
+        elif dimension in ["job_name", "location", "site"]: # Added "site" for completeness, though DimJob.site is accessed via DimJob
             ensure_join(DimJob, FactShift.job_id == DimJob.job_id)
             
-        # Handle Filter Joins
-        if filter_clients:
-            ensure_join(DimClient, FactShift.client_id == DimClient.client_id)
-            query = query.filter(DimClient.client_name.in_(filter_clients))
-            
-        if filter_locations or filter_sites:
+        # Ensure DimJob join if splitting by location or site
+        if split_by_location or split_by_site:
             ensure_join(DimJob, FactShift.job_id == DimJob.job_id)
             
-            if filter_locations:
-                query = query.filter(DimJob.location.in_(filter_locations))
-            
-            if filter_sites:
-                query = query.filter(DimJob.site.in_(filter_sites))
-
         query = query.filter(
             DimDate.date >= start,
             DimDate.date <= end
-        ).group_by(dim_col)
+        )
+
+        # Apply global role-based location filtering and requested filters
+        query = apply_dashboard_filters(query)
+
+        group_by_cols = [dim_col]
+        order_by_cols = [dim_col]
+
+        if split_by_location:
+            group_by_cols.append(DimJob.location)
+            order_by_cols.append(DimJob.location)
+        if split_by_site:
+            group_by_cols.append(DimJob.site)
+            order_by_cols.append(DimJob.site)
+            
+        query = query.group_by(*group_by_cols)
         
-        # For month dimension, order by the minimum date in each month group for chronological order
+        # Order by dimension
         if dimension == "month":
             query = query.order_by(func.min(DimDate.date))
         else:
-            query = query.order_by(dim_col)
+            query = query.order_by(*order_by_cols)
 
         results = query.all()
+
+        # NEW: Calculate Top 3 Clients for the current filters
+        top_clients_query = db.session.query(
+            DimClient.client_name,
+            func.sum(FactShift.client_net).label("revenue")
+        ).join(
+            FactShift, FactShift.client_id == DimClient.client_id
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        )
+
+        # Apply same filters
+        top_clients_query = top_clients_query.filter(
+            DimDate.date >= start,
+            DimDate.date <= end
+        )
+        top_clients_query = apply_dashboard_filters(top_clients_query)
+        
+        top_clients_results = top_clients_query.group_by(
+            DimClient.client_name
+        ).order_by(
+            desc("revenue")
+        ).limit(3).all()
+
+        top_clients_data = [
+            {"name": name, "revenue": round(float(rev or 0), 2)}
+            for name, rev in top_clients_results
+        ]
 
         # Month abbreviation mapping
         month_abbrev = {
@@ -753,12 +968,22 @@ def api_chart_data():
                 name_value = month_abbrev[name_value]
             
             item = {"name": name_value}
+            if split_by_location:
+                item["location"] = row.location
+            if split_by_site:
+                item["site"] = row.site
+            
             for m in valid_metrics:
                 val = getattr(row, m)
                 item[m] = round(float(val or 0), 2)
             data.append(item)
 
-        return jsonify(data)
+        return jsonify({
+            "data": data,
+            "summary": {
+                "topClients": top_clients_data
+            }
+        })
 
     except Exception as e:
         current_app.logger.error(f"Error in chart-data API: {e}")

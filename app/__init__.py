@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from flask import Flask, send_from_directory
 from flask_login import LoginManager
 from flask_caching import Cache
+from flask_cors import CORS
 
 # Import db from models to avoid circular imports
 from .models import db, User
@@ -17,7 +18,7 @@ from .models import db, User
 cache = Cache()
 
 login_manager = LoginManager()
-login_manager.login_view = "auth.login"
+login_manager.login_view = "/auth"
 login_manager.login_message_category = "warning"
 
 @login_manager.user_loader
@@ -71,6 +72,7 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
         'CACHE_TYPE': 'SimpleCache',
         'CACHE_DEFAULT_TIMEOUT': 300  # 5 minutes
     })
+    CORS(app)
 
     # Import models so they are registered
     from . import models  # noqa: F401
