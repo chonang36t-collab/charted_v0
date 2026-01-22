@@ -27,9 +27,10 @@ This guide will walk you through deploying your Flask application (with the pre-
 2. Connect your GitHub repository.
 3. **Name**: `sales-dashboard` (this will be part of your URL).
 4. **Environment**: `Python 3`.
+   - **Note**: I have added a `.python-version` file to the repo. Render will automatically use **Python 3.11**. If it asks, ensure you don't use 3.13.
 5. **Region**: Choose one closest to you.
 6. **Branch**: `main` (or your preferred branch).
-7. **Root Directory**: `charted`  <-- **VERY IMPORTANT**
+7. **Root Directory**: (Leave this **BLANK**) if your repo contains `run.py` at the top level.  <-- **IMPORTANT**
 8. **Build Command**: `chmod +x build.sh && ./build.sh`
 9. **Start Command**: `gunicorn --bind 0.0.0.0:$PORT run:app`
 
