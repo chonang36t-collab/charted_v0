@@ -371,7 +371,7 @@ class dbDataLoader:
                 })
                 continue
             
-            # Create key
+            # Create unique key
             key = (int(employee_id), int(date_id), int(shift_id))
             
             # Check for duplicates in database
@@ -395,10 +395,9 @@ class dbDataLoader:
                 })
                 continue
             
-            # Handle formula in client_net (Excel formula "=+R2*M2")
+            # Handle formula in client_net
             client_net_value = row.get('client_net', 0)
             if isinstance(client_net_value, str) and client_net_value.startswith('='):
-                # Calculate the value: R2*M2 = client_hourly_rate * paid_hours
                 try:
                     hourly_rate = self._safe_float(row.get('client_hourly_rate', 0))
                     paid_hours = self._safe_float(row.get('paid_hours', 0))
@@ -420,15 +419,15 @@ class dbDataLoader:
                 'additions': self._safe_float(row.get('additions', 0)),
                 'total_pay': self._safe_float(row.get('total_pay', 0)),
                 'client_hourly_rate': self._safe_float(row.get('client_hourly_rate', 0)),
-                'client_net': self._safe_float(client_net_value),  # Use calculated value
+                'client_net': self._safe_float(client_net_value),
                 'self_employed': self._safe_bool(row.get('self_employed', False)),
                 'dns': self._safe_bool(row.get('dns', False)),
-                'job_status': self._clean_string(row.get('job_status', ''))
+                'job_status': self._clean_string(row.get('job_status', ''))[:50]  # Truncate to match DB constraints
             }
             
             fact_records.append(fact_record)
-            seen_in_current_file[key] = idx + 2  # Store Excel row number
-            existing_keys.add(key)  # Prevent duplicates within this file
+            seen_in_current_file[key] = idx + 2
+            existing_keys.add(key)
         
         print(f"\n=== SUMMARY ===")
         print(f"Total rows: {len(df)}")

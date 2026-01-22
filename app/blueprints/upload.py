@@ -29,23 +29,25 @@ def upload_file():
         file_path = os.path.join(upload_folder, filename)
         file.save(file_path)
         
-        try:
-            # Load data into database
+        def generate_response():
             loader = dbDataLoader()
-            success = loader.load_excel_data(file_path)
-            
-            # Clean up temporary file
-            os.remove(file_path)
-            
-            if success:
-                return jsonify({'message': 'File successfully uploaded and processed'}), 200
-            else:
-                return jsonify({'error': 'Failed to process file'}), 500
-                
-        except Exception as e:
-            # Clean up temporary file on error
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            return jsonify({'error': f'Error processing file: {str(e)}'}), 500
+            import json
+            try:
+                # Iterate through the generator
+                for status_update in loader.load_excel_data(file_path):
+                    yield json.dumps(status_update) + '\n'
+            except Exception as e:
+                # This catches any error in the generator itself if not handled there
+                yield json.dumps({"status": "error", "message": f"Upload error: {str(e)}"}) + '\n'
+            finally:
+                # Clean up file after processing matches
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+
+        from flask import Response, stream_with_context
+        return Response(stream_with_context(generate_response()), mimetype='application/json')
     
     return jsonify({'error': 'Invalid file type'}), 400

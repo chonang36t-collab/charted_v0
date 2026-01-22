@@ -13,7 +13,9 @@ from flask import (
     current_app,
     jsonify,
     request,
+    send_from_directory,
 )
+import os
 from flask_login import login_required, current_user
 from sqlalchemy import func, case, desc
 
@@ -24,6 +26,13 @@ from .models import FactShift, DimEmployee, DimClient, DimJob, DimDate, DimShift
 from .utils.data_loader import dbDataLoader
 
 main_bp = Blueprint("main", __name__)
+
+@main_bp.route("/", defaults={"path": ""})
+@main_bp.route("/<path:path>")
+def serve(path):
+    if path != "" and os.path.exists(os.path.join(current_app.static_folder, path)):
+        return send_from_directory(current_app.static_folder, path)
+    return send_from_directory(current_app.static_folder, "index.html")
 
 # Define required columns for the new structure
 REQUIRED_COLUMNS = [
@@ -84,6 +93,107 @@ def api_get_locations():
         return jsonify([loc[0] for loc in locations if loc[0]])
     except Exception as e:
         current_app.logger.error(f"Error fetching locations: {e}")
+        return jsonify([]), 500
+
+@main_bp.route("/api/sites")
+@login_required
+def api_get_sites():
+    """Get unique list of sites, optionally filtered by location and role"""
+    try:
+        # Use DimJob as the base
+        query = db.session.query(DimJob.site).distinct()
+        
+        # apply_dashboard_filters will handle:
+        # 1. Role-based restrictions (Managers only see their locations)
+        # 2. Filtering by specific 'locations' if passed in query params
+        query = apply_dashboard_filters(query)
+        
+        # Additional cleanup: filter out nulls/empties if they exist
+        query = query.filter(DimJob.site != None, DimJob.site != '')
+        
+        sites = query.order_by(DimJob.site).all()
+        return jsonify([s[0] for s in sites])
+    except Exception as e:
+        current_app.logger.error(f"Error fetching sites: {e}")
+        # Return empty list on error
+        return jsonify([]), 200
+
+@main_bp.route("/api/rankings/staff")
+@login_required
+def api_rankings_staff():
+    """Get top staff by paid hours"""
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        limit = int(request.args.get("limit", 10))
+        
+        query = db.session.query(
+            DimEmployee.full_name,
+            func.sum(FactShift.paid_hours).label('value')
+        ).join(
+            DimEmployee, FactShift.employee_id == DimEmployee.employee_id
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        )
+        
+        if start and end:
+            query = query.filter(DimDate.date >= start, DimDate.date <= end)
+            
+        # Apply role/location/site filters
+        query = apply_dashboard_filters(query)
+        
+        results = query.group_by(DimEmployee.full_name)\
+            .order_by(desc('value'))\
+            .limit(limit).all()
+            
+        return jsonify([
+            {"name": r[0], "value": float(r[1] or 0)} 
+            for r in results
+        ])
+    except Exception as e:
+        current_app.logger.error(f"Error fetching staff rankings: {e}")
+        return jsonify([]), 500
+
+@main_bp.route("/api/rankings/clients")
+@login_required
+def api_rankings_clients():
+    """Get top clients by revenue or shifts"""
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        limit = int(request.args.get("limit", 5))
+        metric = request.args.get("metric", "revenue") # revenue or shifts
+        
+        if metric == 'revenue':
+            value_col = func.sum(FactShift.client_net).label('value')
+        else:
+            value_col = func.count(FactShift.shift_record_id).label('value')
+            
+        query = db.session.query(
+            DimClient.client_name,
+            value_col
+        ).join(
+            DimClient, FactShift.client_id == DimClient.client_id
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        )
+        
+        if start and end:
+            query = query.filter(DimDate.date >= start, DimDate.date <= end)
+            
+        # Apply role/location/site filters
+        query = apply_dashboard_filters(query)
+        
+        results = query.group_by(DimClient.client_name)\
+            .order_by(desc('value'))\
+            .limit(limit).all()
+            
+        return jsonify([
+            {"name": r[0], "value": float(r[1] or 0)} 
+            for r in results
+        ])
+    except Exception as e:
+        current_app.logger.error(f"Error fetching client rankings: {e}")
         return jsonify([]), 500
 
 @main_bp.route("/api/metrics")
@@ -519,93 +629,8 @@ def api_sales_summary_combined():
             "aggregationLevel": "daily"
         })
         
-def apply_dashboard_filters(query):
-    """
-    Unified utility to apply location and site filtering based on user role 
-    and requested filters (from query parameters).
-    """
-    requested_clients = request.args.getlist("clients")
-    requested_locations = request.args.getlist("locations")
-    requested_sites = request.args.getlist("sites")
-    
-    # Helper to check if DimJob is already joined
-    def is_dim_job_joined(q):
-        try:
-            for join in q._setup_joins:
-                if hasattr(join[0], 'mapper') and join[0].mapper.class_ == DimJob:
-                    return True
-            for desc in q.column_descriptions:
-                if desc.get('entity') == DimJob or (hasattr(desc.get('type'), 'mapper') and desc.get('type').mapper.class_ == DimJob):
-                    return True
-        except Exception:
-            pass
-        return False
 
-    def ensure_dim_job(q):
-        if not is_dim_job_joined(q):
-            return q.join(DimJob, FactShift.job_id == DimJob.job_id)
-        return q
-
-    def is_dim_client_joined(q):
-        try:
-            for join in q._setup_joins:
-                if hasattr(join[0], 'mapper') and join[0].mapper.class_ == DimClient:
-                    return True
-            for desc in q.column_descriptions:
-                if desc.get('entity') == DimClient or (hasattr(desc.get('type'), 'mapper') and desc.get('type').mapper.class_ == DimClient):
-                    return True
-        except Exception:
-            pass
-        return False
-
-    def ensure_dim_client(q):
-        if not is_dim_client_joined(q):
-            return q.join(DimClient, FactShift.client_id == DimClient.client_id)
-        return q
-
-    # 0. Handle Client Filtering
-    if requested_clients:
-        query = ensure_dim_client(query)
-        query = query.filter(DimClient.client_name.in_(requested_clients))
-
-    # 1. Handle Location Filtering
-    if current_user.role == 'admin':
-        if requested_locations:
-            query = ensure_dim_job(query)
-            query = query.filter(DimJob.location.in_(requested_locations))
-    else:
-        # Non-admins: Security intersection
-        import json
-        user_locations = json.loads(current_user.location) if current_user.location else []
-        
-        if not user_locations:
-            return query.filter(text("1=0"))
-        
-        query = ensure_dim_job(query)
-        
-        if requested_locations:
-            # Only allow requested locations that are assigned to the user
-            # Support partial matching (e.g. "LHR" matches "LHR - London Heathrow")
-            target_locations = []
-            for req in requested_locations:
-                if any(u in req or req in u for u in user_locations):
-                    target_locations.append(req)
-            
-            if not target_locations:
-                return query.filter(text("1=0"))
-            query = query.filter(DimJob.location.in_(target_locations))
-        else:
-            # Default: show all user locations
-            from sqlalchemy import or_
-            filters = [DimJob.location.like(f"{loc}%") for loc in user_locations]
-            query = query.filter(or_(*filters))
-
-    # 2. Handle Site Filtering (already within selected/allowed locations)
-    if requested_sites:
-        query = ensure_dim_job(query)
-        query = query.filter(DimJob.site.in_(requested_sites))
-        
-    return query
+from .utils.filters import apply_dashboard_filters
 
 @main_bp.route("/api/financial-summary")
 @login_required
@@ -814,7 +839,16 @@ def api_chart_data():
         if current_user.role != 'admin':
             financial_metrics = {'revenue', 'cost', 'profit', 'profit_margin', 'avg_bill_rate', 'avg_pay_rate'}
             if any(m in financial_metrics for m in metrics):
-                 return jsonify({"error": "Access denied: Financial metrics are restricted to administrators."}), 403
+                return jsonify({"error": "Access denied: Financial metrics are restricted to administrators."}), 403
+            
+            # Verify user has access to at least one location
+            try:
+                import json
+                user_locations = json.loads(current_user.location) if current_user.location else []
+                if not user_locations:
+                    return jsonify({"error": "No locations assigned. Please contact an administrator."}), 403
+            except json.JSONDecodeError:
+                return jsonify({"error": "Invalid location data. Please contact an administrator."}), 403
 
         # Map dimension to model column
         dim_map = {

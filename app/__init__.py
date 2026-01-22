@@ -91,11 +91,13 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
     from .routes import main_bp
     from .blueprints.advanced_reports import advanced_reports_bp
     from .blueprints.upload import upload_bp
+    from .blueprints.records import records_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
     app.register_blueprint(advanced_reports_bp)
     app.register_blueprint(upload_bp, url_prefix='/api')
+    app.register_blueprint(records_bp)
 
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
