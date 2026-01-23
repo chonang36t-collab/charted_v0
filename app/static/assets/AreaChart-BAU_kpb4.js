@@ -1,1 +1,0 @@
-import{q as a,A as s,X as r,Y as i,r as x}from"./generateCategoricalChart-Duo-jgrn.js";var e=a({chartName:"AreaChart",GraphicalChild:s,axisComponents:[{axisType:"xAxis",AxisComp:r},{axisType:"yAxis",AxisComp:i}],formatAxisMap:x});export{e as A};

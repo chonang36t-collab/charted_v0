@@ -1,1 +1,0 @@
-const a="",p={SALES_SUMMARY:`${a}/api/sales-summary`,UPLOAD:`${a}/api/upload`,UPLOAD_REQUIRED_COLUMNS:`${a}/api/upload/required-columns`,REPORT_COLUMNS:`${a}/api/reports/columns`,REPORT_DATA:`${a}/api/reports/data`,USERS:`${a}/api/users`,LOGIN:`${a}/api/login`,SIGNUP:`${a}/api/signup`};export{p as A};

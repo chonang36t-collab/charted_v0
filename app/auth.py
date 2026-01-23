@@ -7,7 +7,11 @@ from flask_login import login_user, logout_user, login_required, current_user
 from . import db
 from .models import User
 
-
+import pyotp
+import qrcode
+import io
+import base64
+import json
 
 auth_bp = Blueprint("auth", __name__, url_prefix="")
 
@@ -68,10 +72,122 @@ def api_login():
     ).first()
     
     if user and user.check_password(password):
-        login_user(user)
-        return jsonify({"token": "session", "message": "Login successful."})
+        if not user.two_factor_enabled:
+            login_user(user)
+            return jsonify({"token": "session", "message": "Login successful."})
+        
+        # 2FA requested
+        if not user.two_factor_setup_complete:
+            return jsonify({"status": "2fa_setup_required", "username": user.username})
+        
+        return jsonify({"status": "2fa_login_required", "username": user.username})
 
     return jsonify({"error": "Invalid username or password."}), 401
+
+
+@auth_bp.route("/api/2fa/setup", methods=["POST"])
+def api_2fa_setup():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    
+    user = User.query.filter_by(username=username).first()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    if not user.otp_secret:
+        user.otp_secret = pyotp.random_base32()
+        db.session.commit()
+    
+    totp = pyotp.TOTP(user.otp_secret)
+    provisioning_uri = totp.provisioning_uri(name=user.email, issuer_name="Sales Insight")
+    
+    # Generate QR Code
+    try:
+        img = qrcode.make(provisioning_uri)
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+    except Exception as e:
+        return jsonify({"error": f"QR generation failed: {str(e)}"}), 500
+    
+    return jsonify({
+        "qr_code": f"data:image/png;base64,{img_str}",
+        "secret": user.otp_secret
+    })
+
+
+@auth_bp.route("/api/2fa/verify-setup", methods=["POST"])
+def api_2fa_verify_setup():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    token = data.get("token")
+    
+    user = User.query.filter_by(username=username).first()
+    if not user or not user.otp_secret:
+        return jsonify({"error": "Invalid request"}), 400
+    
+    totp = pyotp.TOTP(user.otp_secret)
+    if totp.verify(token):
+        user.two_factor_setup_complete = True
+        db.session.commit()
+        login_user(user)
+        return jsonify({"token": "session", "message": "2FA setup complete and logged in."})
+    
+    return jsonify({"error": "Invalid verification token"}), 401
+
+
+@auth_bp.route("/api/debug/qr", methods=["GET"])
+def debug_qr():
+    try:
+        import sys
+        # Test qrcode generation
+        img = qrcode.make("test_debug_qr")
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        
+        # Check packages
+        try:
+            import PIL
+            pil_version = PIL.__version__
+            pil_file = PIL.__file__
+        except ImportError:
+            pil_version = "Not installed"
+            pil_file = "N/A"
+            
+        return jsonify({
+            "status": "success",
+            "message": "QR Code generated successfully",
+            "pil_version": pil_version,
+            "pil_file": pil_file,
+            "python_executable": sys.executable,
+            "qr_sample_len": len(img_str)
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@auth_bp.route("/api/2fa/login-verify", methods=["POST"])
+def api_2fa_login_verify():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    token = data.get("token")
+    
+    user = User.query.filter_by(username=username).first()
+    if not user or not user.otp_secret:
+        return jsonify({"error": "Invalid request"}), 400
+    
+    totp = pyotp.TOTP(user.otp_secret)
+    if totp.verify(token):
+        login_user(user)
+        return jsonify({"token": "session", "message": "Login successful."})
+    
+    return jsonify({"error": "Invalid verification token"}), 401
 
 
 @auth_bp.route("/api/user/profile", methods=["GET"])
@@ -104,6 +220,8 @@ def api_list_users():
             "role": user.role,
             "location": user.location,
             "locations": json.loads(user.location) if user.location else [],  # Parse JSON array
+            "two_factor_enabled": user.two_factor_enabled,
+            "two_factor_setup_complete": user.two_factor_setup_complete,
             "status": "Active",  # Default status
             "created_at": user.created_at.isoformat() if user.created_at else None,
         }
@@ -142,13 +260,21 @@ def api_create_user():
     if not email:
         return jsonify({"error": "Email is required."}), 400
 
+    two_factor_enabled = data.get("two_factor_enabled", True)
+    
     if User.query.filter_by(username=username).first():
         return jsonify({"error": "Username already exists."}), 409
     
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "Email already exists."}), 409
 
-    user = User(username=username, email=email, role=role, location=location_json)
+    user = User(
+        username=username, 
+        email=email, 
+        role=role, 
+        location=location_json,
+        two_factor_enabled=two_factor_enabled
+    )
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
@@ -205,6 +331,14 @@ def api_update_user(user_id):
     
     # Update location
     user.location = location_json
+    
+    if "two_factor_enabled" in data:
+        user.two_factor_enabled = bool(data["two_factor_enabled"])
+        if not user.two_factor_enabled:
+            # Reset setup if disabled? Or keep secret?
+            # Keeping secret is safer for re-enabling, but maybe we want a fresh start
+             user.two_factor_setup_complete = False
+             user.otp_secret = None
     
     if password:
         user.set_password(password)

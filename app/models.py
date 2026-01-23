@@ -1,4 +1,4 @@
-from flask_sqlalchemy import SQLAlchemy
+ï»¿from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
@@ -15,6 +15,11 @@ class User(UserMixin, db.Model):
     role = db.Column(db.String(20), default='user')
     location = db.Column(db.String(200), nullable=True)  # For manager location assignment
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # 2FA fields
+    otp_secret = db.Column(db.String(32), nullable=True)
+    two_factor_enabled = db.Column(db.Boolean, default=True)
+    two_factor_setup_complete = db.Column(db.Boolean, default=False)
     
     def __repr__(self):
         return f'<User {self.username}>'
@@ -120,9 +125,9 @@ class PayBandSettings(db.Model):
     __tablename__ = 'pay_band_settings'
     
     id = db.Column(db.Integer, primary_key=True)
-    premium_threshold = db.Column(db.Float, default=14.0)  # £14+/hour
-    standard_threshold = db.Column(db.Float, default=13.0)  # £13-14/hour
-    basic_threshold = db.Column(db.Float, default=12.0)    # £12-13/hour
+    premium_threshold = db.Column(db.Float, default=14.0)  # Â£14+/hour
+    standard_threshold = db.Column(db.Float, default=13.0)  # Â£13-14/hour
+    basic_threshold = db.Column(db.Float, default=12.0)    # Â£12-13/hour
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def __repr__(self):
