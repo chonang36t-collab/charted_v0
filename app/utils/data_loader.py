@@ -316,16 +316,33 @@ class dbDataLoader:
         skipped_details = []
         
         
-        # Get ALL existing fact records for proper deduplication
+        # Get existing fact records for proper deduplication - SCOPED BY DATE
         existing_keys = set()
         try:
-            query = text("SELECT employee_id, date_id, shift_id FROM fact_shifts")
-            result = db.session.execute(query)
-            for row in result:
-                key = (int(row[0]), int(row[1]), int(row[2]))
-                existing_keys.add(key)
+             # Determine date range from dataframe to optimize query
+            date_ids = []
+            for date_val in df['date'].unique():
+                _, date_id = self._clean_date_with_id(date_val)
+                date_ids.append(date_id)
+            
+            if date_ids:
+                min_date = min(date_ids)
+                max_date = max(date_ids)
+                
+                query = text("""
+                    SELECT employee_id, date_id, shift_id 
+                    FROM fact_shifts 
+                    WHERE date_id BETWEEN :min_date AND :max_date
+                """)
+                result = db.session.execute(query, {"min_date": min_date, "max_date": max_date})
+                for row in result:
+                    key = (int(row[0]), int(row[1]), int(row[2]))
+                    existing_keys.add(key)
+                print(f"Loaded {len(existing_keys)} existing fact records for deduplication (Range: {min_date}-{max_date})")
         except Exception as e:
             print(f"Error fetching existing fact records: {e}")
+            # If error, we might skip deduplication check against DB, risking errors on insert if constraint exists
+            pass
         
         # Track duplicates within current file
         seen_in_current_file = {}
