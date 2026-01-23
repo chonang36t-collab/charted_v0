@@ -1,7 +1,7 @@
 """Authentication and user management blueprint."""
 from __future__ import annotations
 from functools import wraps
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
+from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
 
 from . import db
@@ -53,6 +53,7 @@ def login_redirect():
 @login_required
 def logout():
     logout_user()
+    session.pop('pending_user_id', None) # Clean up
     flash("Logged out.", "info")
     return redirect("/auth")
 
@@ -76,21 +77,25 @@ def api_login():
             login_user(user)
             return jsonify({"token": "session", "message": "Login successful."})
         
-        # 2FA requested
-        if not user.two_factor_setup_complete:
-            return jsonify({"status": "2fa_setup_required", "username": user.username})
+        # 2FA requested - Store in session
+        session['pending_user_id'] = user.id
         
-        return jsonify({"status": "2fa_login_required", "username": user.username})
+        if not user.two_factor_setup_complete:
+            return jsonify({"status": "2fa_setup_required"})
+        
+        return jsonify({"status": "2fa_login_required"})
 
     return jsonify({"error": "Invalid username or password."}), 401
 
 
 @auth_bp.route("/api/2fa/setup", methods=["POST"])
 def api_2fa_setup():
-    data = request.get_json(silent=True) or {}
-    username = data.get("username")
-    
-    user = User.query.filter_by(username=username).first()
+    # Use session instead of request body for security
+    user_id = session.get('pending_user_id')
+    if not user_id:
+         return jsonify({"error": "Unauthorized: No pending login session."}), 401
+
+    user = User.query.get(user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
     
@@ -119,10 +124,13 @@ def api_2fa_setup():
 @auth_bp.route("/api/2fa/verify-setup", methods=["POST"])
 def api_2fa_verify_setup():
     data = request.get_json(silent=True) or {}
-    username = data.get("username")
     token = data.get("token")
     
-    user = User.query.filter_by(username=username).first()
+    user_id = session.get('pending_user_id')
+    if not user_id:
+         return jsonify({"error": "Unauthorized: No pending login session."}), 401
+
+    user = User.query.get(user_id)
     if not user or not user.otp_secret:
         return jsonify({"error": "Invalid request"}), 400
     
@@ -130,6 +138,7 @@ def api_2fa_verify_setup():
     if totp.verify(token):
         user.two_factor_setup_complete = True
         db.session.commit()
+        session.pop('pending_user_id', None) # Clear pending session
         login_user(user)
         return jsonify({"token": "session", "message": "2FA setup complete and logged in."})
     
@@ -175,16 +184,20 @@ def debug_qr():
 @auth_bp.route("/api/2fa/login-verify", methods=["POST"])
 def api_2fa_login_verify():
     data = request.get_json(silent=True) or {}
-    username = data.get("username")
     token = data.get("token")
     
-    user = User.query.filter_by(username=username).first()
+    user_id = session.get('pending_user_id')
+    if not user_id:
+         return jsonify({"error": "Unauthorized: No pending login session."}), 401
+
+    user = User.query.get(user_id)
     if not user or not user.otp_secret:
         return jsonify({"error": "Invalid request"}), 400
     
     totp = pyotp.TOTP(user.otp_secret)
     if totp.verify(token):
         login_user(user)
+        session.pop('pending_user_id', None) # Clear pending session
         return jsonify({"token": "session", "message": "Login successful."})
     
     return jsonify({"error": "Invalid verification token"}), 401
