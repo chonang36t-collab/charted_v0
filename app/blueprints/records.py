@@ -115,7 +115,7 @@ def api_records():
             
             item = {
                 "id": fact.shift_record_id,
-                "date": row[5].isoformat() if row[5] else None,
+                "date": row[5] if row[5] else None,
                 "fullName": row[1],
                 "clientName": row[2],
                 "location": row[3],
@@ -126,7 +126,7 @@ def api_records():
                 "paidHours": float(fact.paid_hours or 0),
                 "totalPay": float(fact.total_pay or 0),
                 "clientNet": float(fact.client_net or 0),
-                "totalCharge": float(fact.total_charge or 0),
+                "totalCharge": float((fact.client_hourly_rate or 0) * (fact.paid_hours or 0)),
                 "hourRate": float(fact.hour_rate or 0),
                 "clientHourlyRate": float(fact.client_hourly_rate or 0),
                 "jobStatus": fact.job_status,
