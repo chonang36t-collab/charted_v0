@@ -94,11 +94,10 @@ class dbDataLoader:
         employees_map = {}
         
         # Get existing employees - use a dictionary for O(1) lookup
+        # OPTIMIZATION: Fetch tuple instead of full object
         existing_employees = {}
-        for emp in DimEmployee.query.all():
-            # Create a composite key for lookup
-            key = f"{emp.full_name}"
-            existing_employees[key] = emp.employee_id
+        for full_name, emp_id in db.session.query(DimEmployee.full_name, DimEmployee.employee_id).all():
+            existing_employees[full_name] = emp_id
         
         new_employees = []
         for _, row in employees_df.iterrows():
@@ -127,10 +126,12 @@ class dbDataLoader:
             db.session.commit()
             
             # Get IDs of newly inserted employees
-            for emp in new_employees:
-                employee = DimEmployee.query.filter_by(full_name=emp['full_name']).first()
-                if employee:
-                    employees_map[emp['full_name']] = employee.employee_id
+            # OPTIMIZATION: Fetch only needed columns
+            new_names = [e['full_name'] for e in new_employees]
+            results = db.session.query(DimEmployee.full_name, DimEmployee.employee_id)\
+                        .filter(DimEmployee.full_name.in_(new_names)).all()
+            for full_name, emp_id in results:
+                employees_map[full_name] = emp_id
         
         return employees_map
 
@@ -139,7 +140,8 @@ class dbDataLoader:
         clients_map = {}
         
         # Get existing clients
-        existing_clients = {client.client_name: client.client_id for client in DimClient.query.all()}
+        # OPTIMIZATION: Fetch tuple
+        existing_clients = {name: cid for name, cid in db.session.query(DimClient.client_name, DimClient.client_id).all()}
         
         new_clients = []
         for _, row in clients_df.iterrows():
@@ -157,10 +159,11 @@ class dbDataLoader:
             db.session.commit()
             
             # Get IDs of newly inserted clients
-            for client in new_clients:
-                client_obj = DimClient.query.filter_by(client_name=client['client_name']).first()
-                if client_obj:
-                    clients_map[client['client_name']] = client_obj.client_id
+            new_names = [c['client_name'] for c in new_clients]
+            results = db.session.query(DimClient.client_name, DimClient.client_id)\
+                        .filter(DimClient.client_name.in_(new_names)).all()
+            for name, cid in results:
+                clients_map[name] = cid
         
         return clients_map
     
@@ -169,7 +172,8 @@ class dbDataLoader:
         jobs_map = {}
         
         # Get existing jobs
-        existing_jobs = {job.job_name: job.job_id for job in DimJob.query.all()}
+        # OPTIMIZATION: Fetch tuple
+        existing_jobs = {name: jid for name, jid in db.session.query(DimJob.job_name, DimJob.job_id).all()}
         
         new_jobs = []
         for _, row in jobs_df.iterrows():
@@ -193,12 +197,22 @@ class dbDataLoader:
             db.session.commit()
             
             # Get IDs of newly inserted jobs
+            new_names = [j['job_name'] for j in new_jobs]
+            results = db.session.query(DimJob.job_name, DimJob.job_id)\
+                        .filter(DimJob.job_name.in_(new_names)).all()
+            
+            # Update map - Handle fuzzy matching logic from original code
+            # Note: This logic seems to assume if name matches, we use that ID regardless of location
+            fetched_new = {name: jid for name, jid in results}
+            
             for job in new_jobs:
-                job_obj = DimJob.query.filter_by(job_name=job['job_name']).first()
-                if job_obj:
-                    for key in list(jobs_map.keys()):
-                        if key.startswith(job['job_name'] + '|'):
-                            jobs_map[key] = job_obj.job_id
+                job_name = job['job_name']
+                if job_name in fetched_new:
+                     # Update all keys that relied on this name
+                     jid = fetched_new[job_name]
+                     for key in list(jobs_map.keys()):
+                        if key.startswith(job_name + '|'):
+                            jobs_map[key] = jid
         
         return jobs_map
     
@@ -207,11 +221,12 @@ class dbDataLoader:
         shifts_map = {}
         
         # Get existing shifts with ALL attributes
+        # OPTIMIZATION: Fetch tuple
         existing_shifts = {}
-        for shift in DimShift.query.all():
+        for name, start, end, sid in db.session.query(DimShift.shift_name, DimShift.shift_start, DimShift.shift_end, DimShift.shift_id).all():
             # Create a composite key for exact matching
-            key = f"{shift.shift_name}|{shift.shift_start}|{shift.shift_end}"
-            existing_shifts[key] = shift.shift_id
+            key = f"{name}|{start}|{end}"
+            existing_shifts[key] = sid
         
         new_shifts = []
         for _, row in shifts_df.iterrows():
@@ -241,14 +256,17 @@ class dbDataLoader:
             db.session.commit()
             
             # Get IDs of newly inserted shifts
+            # Complex filtering required for composite key retrieval
+            # Re-querying specifically for the added shifts is tricky without unique constraint
+            # We'll reload cache partially or just query by name
             for shift in new_shifts:
-                shift_key = f"{shift['shift_name']}|{shift['shift_start']}|{shift['shift_end']}"
                 shift_obj = DimShift.query.filter_by(
                     shift_name=shift['shift_name'],
                     shift_start=shift['shift_start'],
                     shift_end=shift['shift_end']
                 ).first()
                 if shift_obj:
+                    shift_key = f"{shift['shift_name']}|{shift['shift_start']}|{shift['shift_end']}"
                     shifts_map[shift_key] = shift_obj.shift_id
         
         return shifts_map
@@ -258,10 +276,11 @@ class dbDataLoader:
         dates_map = {}
         
         # Get existing dates
+        # OPTIMIZATION: Fetch tuple
         existing_dates = {}
-        for date_obj in DimDate.query.all():
+        for date_val, date_id in db.session.query(DimDate.date, DimDate.date_id).all():
             # date is stored as string 'YYYY-MM-DD'
-            existing_dates[str(date_obj.date)] = date_obj.date_id
+            existing_dates[str(date_val)] = date_id
         
         
         new_dates = []
