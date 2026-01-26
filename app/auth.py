@@ -104,7 +104,7 @@ def api_2fa_setup():
         db.session.commit()
     
     totp = pyotp.TOTP(user.otp_secret)
-    provisioning_uri = totp.provisioning_uri(name=user.email, issuer_name="Sales Insight")
+    provisioning_uri = totp.provisioning_uri(name=user.email, issuer_name="36T Analytics")
     
     # Generate QR Code
     try:
