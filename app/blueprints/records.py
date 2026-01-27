@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from sqlalchemy import or_, desc, asc, text
 from app.models import db, FactShift, DimEmployee, DimClient, DimJob, DimDate, DimShift
 from app.utils.filters import apply_dashboard_filters
+from app.auth import manager_required, admin_required
 from datetime import datetime
 
 records_bp = Blueprint("records", __name__)
@@ -107,11 +108,8 @@ def api_records():
             fact = row[0]
             # row: [FactShift, full_name, client_name, location, site, date, shift_name, start, end]
             
-            # Role-based masking for managers (hide margin/costs? or just financial summary?)
-            # Usually record view needs detailed costs for auditing, but let's follow dashboard rule:
-            # If viewer/manager, maybe hide 'total_pay' (cost) if sensitive? 
-            # For now, we return everything, assuming "Records" view users have appropriate clearance or we rely on location RBAC.
-            # If strict financial hiding is needed, we mask it here.
+            # Role-based masking
+            is_admin = (current_user.role == 'admin')
             
             item = {
                 "id": fact.shift_record_id,
@@ -124,13 +122,13 @@ def api_records():
                 "shiftStart": row[7].isoformat() if row[7] else None,
                 "shiftEnd": row[8].isoformat() if row[8] else None,
                 "paidHours": float(fact.paid_hours or 0),
-                "totalPay": float(fact.total_pay or 0),
-                "clientNet": float(fact.client_net or 0),
-                "totalCharge": float((fact.client_hourly_rate or 0) * (fact.paid_hours or 0)),
-                "hourRate": float(fact.hour_rate or 0),
-                "clientHourlyRate": float(fact.client_hourly_rate or 0),
+                "totalPay": float(fact.total_pay or 0) if is_admin else None,
+                "clientNet": float(fact.client_net or 0) if is_admin else None,
+                "totalCharge": float((fact.client_hourly_rate or 0) * (fact.paid_hours or 0)) if is_admin else None,
+                "hourRate": float(fact.hour_rate or 0) if is_admin else None,
+                "clientHourlyRate": float(fact.client_hourly_rate or 0) if is_admin else None,
                 "jobStatus": fact.job_status,
-                "jobName": fact.job.job_name if fact.job else "" # Access via relationship if needed or add to join
+                "jobName": fact.job.job_name if fact.job else "" 
             }
             data.append(item)
             
@@ -146,4 +144,181 @@ def api_records():
         
     except Exception as e:
         current_app.logger.error(f"Error fetching records: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@records_bp.route("/api/records/options")
+@login_required
+def api_record_options():
+    try:
+        employees = db.session.query(DimEmployee.employee_id, DimEmployee.full_name).order_by(DimEmployee.full_name).all()
+        clients = db.session.query(DimClient.client_id, DimClient.client_name).order_by(DimClient.client_name).all()
+        
+        # Jobs - apply role filters
+        job_query = db.session.query(DimJob.job_id, DimJob.job_name, DimJob.location, DimJob.site).order_by(DimJob.job_name)
+        job_query = apply_dashboard_filters(job_query)
+        jobs = job_query.all()
+        
+        shifts = db.session.query(DimShift.shift_id, DimShift.shift_name, DimShift.shift_start, DimShift.shift_end).order_by(DimShift.shift_name).all()
+        
+        return jsonify({
+            "employees": [{"id": e[0], "name": e[1]} for e in employees],
+            "clients": [{"id": c[0], "name": c[1]} for c in clients],
+            "jobs": [{"id": j[0], "name": j[1], "location": j[2], "site": j[3]} for j in jobs],
+            "shifts": [{"id": s[0], "name": s[1], "start": s[2].isoformat() if s[2] else "", "end": s[3].isoformat() if s[3] else ""} for s in shifts]
+        })
+    except Exception as e:
+        current_app.logger.error(f"Error fetching options: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@records_bp.route("/api/records", methods=["POST"])
+@login_required
+@manager_required
+def create_record():
+    try:
+        data = request.json
+        # Validate required fields
+        req_fields = ['date', 'employeeId', 'clientId', 'jobId', 'shiftId', 'hours']
+        for f in req_fields:
+            if f not in data:
+                 return jsonify({"error": f"Missing field: {f}"}), 400
+                 
+        # Date handling
+        date_str = data['date'] # YYYY-MM-DD
+        date_obj = DimDate.query.filter_by(date=date_str).first()
+        if not date_obj:
+            try:
+                date_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                date_obj = DimDate(
+                    date=date_str,
+                    day=str(date_dt.day),
+                    month=date_dt.strftime('%B'),
+                    year=date_dt.year
+                )
+                db.session.add(date_obj)
+                db.session.flush()
+            except ValueError:
+                return jsonify({"error": "Invalid date format"}), 400
+            
+        # Validate types (e.g., ensure IDs are ints not None or empty strings)
+        try:
+             employee_id = int(data['employeeId'])
+             client_id = int(data['clientId'])
+             job_id = int(data['jobId'])
+             shift_id = int(data['shiftId'])
+             paid_hours = float(data['hours'])
+        except (ValueError, TypeError) as e:
+             return jsonify({"error": f"Invalid data format for IDs or Hours: {str(e)}"}), 400
+
+        pay_rate = 0.0
+        charge_rate = 0.0
+        
+        is_admin = current_user.role == 'admin'
+        if is_admin:
+             try:
+                 pay_rate = float(data.get('hourRate', 0) or 0)
+                 charge_rate = float(data.get('clientHourlyRate', 0) or 0)
+             except ValueError:
+                 pass # Warning: defaults to 0 if invalid
+        
+        total_pay = pay_rate * paid_hours
+        client_net = charge_rate * paid_hours
+        
+        new_record = FactShift(
+            date_id=date_obj.date_id,
+            employee_id=employee_id,
+            client_id=client_id,
+            job_id=job_id,
+            shift_id=shift_id,
+            paid_hours=paid_hours,
+            hour_rate=pay_rate,
+            client_hourly_rate=charge_rate,
+            total_pay=total_pay,
+            client_net=client_net,
+            job_status=data.get('jobStatus', 'Completed')
+        )
+        
+        db.session.add(new_record)
+        db.session.commit()
+        
+        return jsonify({"message": "Record created", "id": new_record.shift_record_id}), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        current_app.logger.error(f"Create error: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": f"Internal Error: {str(e)}"}), 500
+
+@records_bp.route("/api/records/<int:id>", methods=["PUT"])
+@login_required
+@manager_required
+def update_record(id):
+    try:
+        record = FactShift.query.get(id)
+        if not record:
+            return jsonify({"error": "Record not found"}), 404
+            
+        data = request.json
+        is_admin = current_user.role == 'admin'
+        
+        if 'date' in data:
+            date_str = data['date']
+            date_obj = DimDate.query.filter_by(date=date_str).first()
+            if not date_obj:
+                 # Should theoretically create if missing, reusing logic
+                 try:
+                    date_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                    date_obj = DimDate(
+                        date=date_str,
+                        day=str(date_dt.day),
+                        month=date_dt.strftime('%B'),
+                        year=date_dt.year
+                    )
+                    db.session.add(date_obj)
+                    db.session.flush()
+                 except:
+                    pass
+            if date_obj:
+                record.date_id = date_obj.date_id
+
+        if 'employeeId' in data: record.employee_id = data['employeeId']
+        if 'clientId' in data: record.client_id = data['clientId']
+        if 'jobId' in data: record.job_id = data['jobId']
+        if 'shiftId' in data: record.shift_id = data['shiftId']
+        if 'jobStatus' in data: record.job_status = data['jobStatus']
+        
+        if 'hours' in data:
+            record.paid_hours = float(data['hours'])
+            record.total_pay = (record.hour_rate or 0) * record.paid_hours
+            record.client_net = (record.client_hourly_rate or 0) * record.paid_hours
+            
+        if is_admin:
+            if 'hourRate' in data:
+                record.hour_rate = float(data['hourRate'])
+                record.total_pay = record.hour_rate * (record.paid_hours or 0)
+            if 'clientHourlyRate' in data:
+                record.client_hourly_rate = float(data['clientHourlyRate'])
+                record.client_net = record.client_hourly_rate * (record.paid_hours or 0)
+                
+        db.session.commit()
+        return jsonify({"message": "Record updated"}), 200
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Update error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@records_bp.route("/api/records/<int:id>", methods=["DELETE"])
+@login_required
+@manager_required
+def delete_record(id):
+    try:
+        record = FactShift.query.get(id)
+        if not record:
+            return jsonify({"error": "Record not found"}), 404
+        
+        db.session.delete(record)
+        db.session.commit()
+        return jsonify({"message": "Record deleted"}), 200
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Delete error: {e}")
         return jsonify({"error": str(e)}), 500
