@@ -1,0 +1,400 @@
+{
+    "version": "1.0.0",
+    "applicationName": "Data Visualization Platform - Chart Builder",
+    "lastUpdated": "2026-01-27",
+    "chartBuilder": {
+        "route": "/chart-builder",
+        "title": "Chart Builder",
+        "roleAccess": [
+            "admin",
+            "manager"
+        ],
+        "description": "Create custom charts with flexible metrics, dimensions, and filters. Supports financial and operational metrics with various chart types.",
+        "metrics": {
+            "financial": {
+                "roleRequired": "admin",
+                "items": {
+                    "revenue": {
+                        "id": "revenue",
+                        "name": "Revenue",
+                        "description": "Total client revenue (client_net)",
+                        "unit": "currency",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "client_name",
+                            "location",
+                            "job_name"
+                        ],
+                        "incompatibleDimensions": [
+                            "full_name",
+                            "role"
+                        ]
+                    },
+                    "cost": {
+                        "id": "cost",
+                        "name": "Cost",
+                        "description": "Total staff costs (total_pay)",
+                        "unit": "currency",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "client_name",
+                            "location",
+                            "job_name"
+                        ],
+                        "incompatibleDimensions": [
+                            "full_name",
+                            "role"
+                        ]
+                    },
+                    "profit": {
+                        "id": "profit",
+                        "name": "Profit",
+                        "description": "Revenue minus costs",
+                        "unit": "currency",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "client_name",
+                            "location",
+                            "job_name"
+                        ],
+                        "incompatibleDimensions": [
+                            "full_name",
+                            "role"
+                        ]
+                    },
+                    "profit_margin": {
+                        "id": "profit_margin",
+                        "name": "Profit Margin",
+                        "description": "Profit as percentage of revenue",
+                        "unit": "percentage",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "client_name",
+                            "location",
+                            "job_name"
+                        ],
+                        "incompatibleDimensions": [
+                            "full_name",
+                            "role"
+                        ]
+                    }
+                }
+            },
+            "operational": {
+                "roleRequired": null,
+                "items": {
+                    "total_shifts": {
+                        "id": "total_shifts",
+                        "name": "Total Shifts",
+                        "description": "Count of shift records",
+                        "unit": "count",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "client_name",
+                            "full_name",
+                            "role",
+                            "location",
+                            "job_name"
+                        ]
+                    },
+                    "paid_hours": {
+                        "id": "paid_hours",
+                        "name": "Paid Hours",
+                        "description": "Sum of paid hours",
+                        "unit": "hours",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "client_name",
+                            "full_name",
+                            "role",
+                            "location",
+                            "job_name"
+                        ]
+                    },
+                    "duration": {
+                        "id": "duration",
+                        "name": "Duration",
+                        "description": "Sum of shift duration",
+                        "unit": "hours",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "full_name",
+                            "role",
+                            "location"
+                        ]
+                    },
+                    "hourly_rate": {
+                        "id": "hourly_rate",
+                        "name": "Hourly Rate",
+                        "description": "Average hourly rate",
+                        "unit": "currency",
+                        "compatibleDimensions": [
+                            "date",
+                            "month",
+                            "year",
+                            "role",
+                            "location"
+                        ]
+                    }
+                }
+            }
+        },
+        "dimensions": {
+            "time": {
+                "date": {
+                    "id": "date",
+                    "name": "Date",
+                    "description": "Daily breakdown",
+                    "mutuallyExclusiveWith": [
+                        "month",
+                        "year"
+                    ]
+                },
+                "month": {
+                    "id": "month",
+                    "name": "Month",
+                    "description": "Monthly breakdown",
+                    "mutuallyExclusiveWith": [
+                        "date",
+                        "year"
+                    ]
+                },
+                "year": {
+                    "id": "year",
+                    "name": "Year",
+                    "description": "Yearly breakdown",
+                    "mutuallyExclusiveWith": [
+                        "date",
+                        "month"
+                    ]
+                }
+            },
+            "clients": {
+                "client_name": {
+                    "id": "client_name",
+                    "name": "Client Name",
+                    "description": "Breakdown by client"
+                }
+            },
+            "employees": {
+                "full_name": {
+                    "id": "full_name",
+                    "name": "Employee Name",
+                    "description": "Breakdown by employee (only operational metrics)"
+                },
+                "role": {
+                    "id": "role",
+                    "name": "Role",
+                    "description": "Breakdown by employee role"
+                }
+            },
+            "jobs": {
+                "job_name": {
+                    "id": "job_name",
+                    "name": "Job Name",
+                    "description": "Breakdown by job"
+                },
+                "location": {
+                    "id": "location",
+                    "name": "Location",
+                    "description": "Breakdown by location"
+                }
+            }
+        },
+        "chartTypes": {
+            "bar": {
+                "name": "Bar Chart",
+                "bestFor": "Comparing categories",
+                "supportsMultipleMetrics": true
+            },
+            "line": {
+                "name": "Line Chart",
+                "bestFor": "Trends over time",
+                "supportsMultipleMetrics": true
+            },
+            "area": {
+                "name": "Area Chart",
+                "bestFor": "Cumulative trends over time",
+                "supportsMultipleMetrics": true
+            },
+            "pie": {
+                "name": "Pie Chart",
+                "bestFor": "Proportions of a whole",
+                "supportsMultipleMetrics": false,
+                "recommendation": "Use with single metric only"
+            }
+        },
+        "filters": {
+            "dateRange": {
+                "type": "daterange",
+                "required": true,
+                "description": "Select from and to dates, then click 'Apply Range'"
+            },
+            "clients": {
+                "type": "multiselect",
+                "required": false,
+                "dynamic": true,
+                "description": "Filter by specific clients"
+            },
+            "locations": {
+                "type": "multiselect",
+                "required": false,
+                "dynamic": true,
+                "description": "Filter by specific locations"
+            },
+            "sites": {
+                "type": "multiselect",
+                "required": false,
+                "dynamic": true,
+                "dependsOn": "locations",
+                "description": "Filter by specific sites (requires locations to be populated)"
+            }
+        },
+        "splitOptions": {
+            "splitByLocation": {
+                "name": "Split by Location",
+                "description": "Show separate charts for each location",
+                "mutuallyExclusiveWith": [
+                    "splitBySite"
+                ],
+                "requirement": "Works best when multiple locations are in dataset"
+            },
+            "splitBySite": {
+                "name": "Split by Site",
+                "description": "Show separate charts for each site",
+                "mutuallyExclusiveWith": [
+                    "splitByLocation"
+                ],
+                "requirement": "Only available when multiple sites exist in selected locations"
+            }
+        },
+        "limitations": [
+            {
+                "rule": "Financial metrics (revenue, cost, profit, profit_margin) CANNOT be combined with employee dimensions (full_name, role)",
+                "reason": "Security and privacy - employee-level financial data not tracked",
+                "alternative": "Use operational metrics (paid_hours, total_shifts) with employee dimensions instead"
+            },
+            {
+                "rule": "Only ONE dimension allowed per chart (plus optional split view)",
+                "reason": "Chart clarity and performance",
+                "alternative": "Use split views to add a second dimension perspective"
+            },
+            {
+                "rule": "Only ONE time dimension allowed (date OR month OR year, not multiple)",
+                "reason": "Mutually exclusive time granularities",
+                "alternative": "Choose the time granularity that best fits your analysis period"
+            },
+            {
+                "rule": "Pie charts work best with single metric",
+                "reason": "Visual clarity",
+                "alternative": "Use bar or line charts for multiple metrics"
+            },
+            {
+                "rule": "Site filter only appears when locations are selected with multiple sites",
+                "reason": "Context-dependent filtering",
+                "alternative": "Select locations first to enable site filtering"
+            }
+        ],
+        "navigationSteps": {
+            "basic": [
+                "Step 1: Navigate to Chart Builder (click 'Chart Builder' in sidebar)",
+                "Step 2: Select metric(s) from left panel - choose Financial (admin only) or Operational section",
+                "Step 3: Select ONE dimension from the Dimensions section below",
+                "Step 4: Choose chart type from dropdown (Bar, Line, Area, or Pie)",
+                "Step 5: Select date range (From and To dates) and click 'Apply Range' button",
+                "Step 6: (Optional) Add filters - Clients, Locations, or Sites",
+                "Step 7: (Optional) Enable 'Split by Location' or 'Split by Site' toggle for comparative view",
+                "Step 8: View your chart - it updates automatically as you make changes"
+            ],
+            "withSplit": [
+                "Enable split view by toggling 'Split by Location' or 'Split by Site' switch in the header",
+                "Split views create separate chart panels for each location/site",
+                "Compare metrics across locations/sites side-by-side",
+                "Note: Split by Site only available when multiple sites exist"
+            ]
+        }
+    },
+    "commonQueries": {
+        "revenue_by_location": {
+            "query": [
+                "revenue by location",
+                "which location makes most money",
+                "location revenue"
+            ],
+            "page": "chart-builder",
+            "metric": "revenue",
+            "dimension": "location",
+            "chartType": "bar",
+            "roleRequired": "admin",
+            "steps": "Select Revenue metric → Select Location dimension → Choose Bar chart → Apply date range"
+        },
+        "top_clients_revenue": {
+            "query": [
+                "top clients revenue",
+                "best clients",
+                "highest revenue clients"
+            ],
+            "page": "chart-builder",
+            "metric": "revenue",
+            "dimension": "client_name",
+            "chartType": "bar",
+            "roleRequired": "admin",
+            "steps": "Select Revenue metric → Select Client Name dimension → Choose Bar chart → Apply date range → Chart automatically sorts by highest"
+        },
+        "site_profitability": {
+            "query": [
+                "which site most profitable",
+                "site profit margin",
+                "highest return site",
+                "best performing site"
+            ],
+            "page": "chart-builder",
+            "metric": "profit_margin",
+            "dimension": "location",
+            "splitBy": "site",
+            "chartType": "bar",
+            "roleRequired": "admin",
+            "steps": "Select Profit Margin metric → Select Location dimension → Enable 'Split by Site' toggle → Apply date range → Compare profit margins across sites"
+        },
+        "employee_hours": {
+            "query": [
+                "employee hours",
+                "staff hours",
+                "who worked most hours"
+            ],
+            "page": "chart-builder",
+            "metric": "paid_hours",
+            "dimension": "full_name",
+            "chartType": "bar",
+            "roleRequired": null,
+            "steps": "Select Paid Hours metric → Select Employee Name dimension → Choose Bar chart → Apply date range"
+        },
+        "revenue_trends": {
+            "query": [
+                "revenue over time",
+                "revenue trends",
+                "monthly revenue"
+            ],
+            "page": "chart-builder",
+            "metric": "revenue",
+            "dimension": "month",
+            "chartType": "line",
+            "roleRequired": "admin",
+            "steps": "Select Revenue metric → Select Month dimension → Choose Line chart → Apply date range covering multiple months"
+        }
+    }
+}
