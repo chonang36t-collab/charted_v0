@@ -194,14 +194,11 @@ def get_target_performance():
                 # Try finding location target
                 loc_target = target_map.get((year, month, loc, 'ALL'))
                 if loc_target:
-                    # Naively we don't know N sites yet here without complexity.
-                    # We will return the location target and let frontend/middle-logic handle comparison?
-                    # Or simpler: The requirements say "The admin should be able to add 'Target Shifts' for each Locations/sites"
-                    # If they add for Location, it implies a bucket. 
-                    # If they add for Site, it's specific.
-                    final_target = loc_target # Placeholder, implies whole location target vs single site actual which is WRONG.
-                    # TODO: Implement split logic later or assume Admin configures Site targets for now.
-                    final_target = 0 # Default to 0 if not set
+                    # Use location target for this site
+                    # Note: This assigns the full location target to each site
+                    # If you want to split it evenly, additional logic is needed
+                    final_target = loc_target
+            
             
             performance.append({
                 "year": year,
