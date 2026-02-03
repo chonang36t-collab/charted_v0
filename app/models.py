@@ -132,3 +132,29 @@ class PayBandSettings(db.Model):
     
     def __repr__(self):
         return f'<PayBandSettings premium={self.premium_threshold}, standard={self.standard_threshold}, basic={self.basic_threshold}>'
+
+class ShiftTarget(db.Model):
+    __tablename__ = 'shift_targets'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    year = db.Column(db.Integer, nullable=False)
+    month = db.Column(db.String(20), nullable=False) # e.g. "January" or "01" - let's stick to Full Name or whatever DimDate uses. DimDate uses Full Name.
+    location = db.Column(db.String(200), nullable=False)
+    site = db.Column(db.String(200), nullable=True) # If null, applies to whole location (metric aggregation logic needed)
+    target_count = db.Column(db.Integer, default=0)
+    
+    # Composite unique constraint to prevent duplicates
+    __table_args__ = (db.UniqueConstraint('year', 'month', 'location', 'site', name='_year_month_loc_site_uc'),)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class FinancialMetric(db.Model):
+    __tablename__ = 'financial_metrics'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    year = db.Column(db.Integer, nullable=False)
+    month = db.Column(db.String(20), nullable=False)
+    name = db.Column(db.String(100), nullable=False) # e.g., "Overheads", "Marketing Spend"
+    value = db.Column(db.Float, default=0.0)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

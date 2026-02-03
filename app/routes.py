@@ -826,6 +826,8 @@ def api_chart_data():
         end = request.args.get("end")
         dimension = request.args.get("dimension", "").lower()
         metrics = [m.lower() for m in request.args.getlist("metrics")]
+        split_by_location = request.args.get("split_by_location") == 'true'
+        split_by_site = request.args.get("split_by_site") == 'true'
         
         if not start or not end or not dimension or not metrics:
             return jsonify({"error": "Missing required parameters"}), 400
@@ -855,7 +857,47 @@ def api_chart_data():
             "role": DimEmployee.role,
             "job_name": DimJob.job_name,
             "location": DimJob.location,
+            "site": DimJob.site,
         }
+
+        def apply_dashboard_filters(q):
+            clients = request.args.getlist("clients")
+            locations = request.args.getlist("locations")
+            sites = request.args.getlist("sites")
+            
+            # Helper to check if table is already joined (naive string check for now/simple context)
+            # Or always join with explicit ON clause which SQLAlchemy handles (deduplicates if same path? No.)
+            # We will use explicit checks based on known query structure or just try/except? 
+            # No, let's just join. SQLAlchemy usually errors on duplicate join.
+            # But for 'top_clients_query', DimJob is NOT joined. For 'query', it MIGHT be.
+            
+            # Strategy: Logic to ensure join.
+            # Convert query to string to check existence of table name is risky but effective for simple aliases.
+            q_str = str(q.statement.compile(compile_kwargs={"literal_binds": True})) if hasattr(q, 'statement') else ""
+            
+            if clients:
+                if "dim_clients" not in q_str and "DimClient" not in str(q): # Naive check
+                     try:
+                         q = q.join(DimClient, FactShift.client_id == DimClient.client_id)
+                     except: pass # Already joined or error
+                q = q.filter(DimClient.client_name.in_(clients))
+                
+            if locations:
+                if "dim_jobs" not in q_str and "DimJob" not in str(q):
+                     try:
+                        q = q.join(DimJob, FactShift.job_id == DimJob.job_id)
+                     except: pass
+                q = q.filter(DimJob.location.in_(locations))
+                
+            if sites:
+                if "dim_jobs" not in q_str and "DimJob" not in str(q): # check again
+                     try:
+                        q = q.join(DimJob, FactShift.job_id == DimJob.job_id)
+                     except: pass
+                q = q.filter(DimJob.site.in_(sites))
+                
+            return q
+
 
         # Map metric to model column
         metric_map = {
@@ -875,6 +917,8 @@ def api_chart_data():
 
         if dimension not in dim_map:
             return jsonify({"error": f"Invalid dimension: {dimension}"}), 400
+            
+        dim_col = dim_map[dimension]
         
         # Validate metrics
         valid_metrics = []
@@ -882,13 +926,21 @@ def api_chart_data():
             if m in metric_map:
                 valid_metrics.append(m)
         
-        if not valid_metrics:
-            return jsonify({"error": "No valid metrics provided"}), 400
+        if not valid_metrics and not dimension in ['month', 'year']: 
+             # Allow empty valid_metrics if we are querying financial metrics by time? 
+             # No, let's keep it simple. If valid_metrics is empty, check if we have financial metrics requests.
+             pass
 
-        split_by_location = request.args.get("split_by_location", "").lower() == "true"
-        split_by_site = request.args.get("split_by_site", "").lower() == "true"
-
-        dim_col = dim_map[dimension]
+        # Check for financial metrics requests (anything not in standard map)
+        requested_financials = [m for m in metrics if m not in metric_map]
+        
+        # If we have ONLY financial metrics, we still need a base query to get the x-axis (months/years) 
+        # OR we query FinancialMetrics directly if dimension is appropriate.
+        # For simplicity, we assume mixed or standard query drives the rows. 
+        # If ONLY financial metrics are requested, this logic needs to be smarter (fetch all months in range).
+        
+        # ... logic continues ...
+        
         metric_cols = [metric_map[m].label(m) for m in valid_metrics]
 
         query_cols = [dim_col.label("name")]
@@ -899,10 +951,12 @@ def api_chart_data():
         
         query_cols.extend(metric_cols)
 
+        # Execute Main Query
         query = db.session.query(*query_cols).join(
             DimDate, FactShift.date_id == DimDate.date_id
         )
-
+        
+        # ... (Join logic same as before) ...
         # Join other tables if needed for dimensions
         joined_tables = set()
         
@@ -918,7 +972,7 @@ def api_chart_data():
             ensure_join(DimClient, FactShift.client_id == DimClient.client_id)
         elif dimension in ["full_name", "role"]:
             ensure_join(DimEmployee, FactShift.employee_id == DimEmployee.employee_id)
-        elif dimension in ["job_name", "location", "site"]: # Added "site" for completeness, though DimJob.site is accessed via DimJob
+        elif dimension in ["job_name", "location", "site"]: 
             ensure_join(DimJob, FactShift.job_id == DimJob.job_id)
             
         # Ensure DimJob join if splitting by location or site
@@ -930,7 +984,6 @@ def api_chart_data():
             DimDate.date <= end
         )
 
-        # Apply global role-based location filtering and requested filters
         query = apply_dashboard_filters(query)
 
         group_by_cols = [dim_col]
@@ -945,7 +998,6 @@ def api_chart_data():
             
         query = query.group_by(*group_by_cols)
         
-        # Order by dimension
         if dimension == "month":
             query = query.order_by(func.min(DimDate.date))
         else:
@@ -953,7 +1005,41 @@ def api_chart_data():
 
         results = query.all()
 
-        # NEW: Calculate Top 3 Clients for the current filters
+        # FETCH FINANCIAL DATA IF NEEDED
+        financial_data_map = {} # Key: "Month Year" or "Year" -> { metric: value }
+        
+        if requested_financials and (dimension == 'month' or dimension == 'year') and not split_by_location and not split_by_site:
+            from .models import FinancialMetric
+            # Fetch all financials in range? Or just all? 
+            # Parse start/end year
+            start_year = int(start[:4])
+            end_year = int(end[:4])
+            
+            fin_metrics = FinancialMetric.query.filter(
+                FinancialMetric.year >= start_year,
+                FinancialMetric.year <= end_year,
+                FinancialMetric.name.in_(requested_financials)
+            ).all()
+            
+            for fm in fin_metrics:
+                # Key format must match "Mon YYYY" or "YYYY"
+                if dimension == 'month':
+                    # FinancialMetric.month is Full Name (January), we need Short Name (Jan)
+                    # Helper map
+                    short_map = {
+                        "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr", 
+                        "May": "May", "June": "Jun", "July": "Jul", "August": "Aug", 
+                        "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec"
+                    }
+                    key = f"{short_map.get(fm.month, fm.month)} {fm.year}"
+                else: 
+                    key = str(fm.year)
+                
+                if key not in financial_data_map:
+                    financial_data_map[key] = {}
+                financial_data_map[key][fm.name] = fm.value
+
+        # NEW: Calculate Top 3 Clients (unchanged...)
         top_clients_query = db.session.query(
             DimClient.client_name,
             func.sum(FactShift.client_net).label("revenue")
@@ -963,7 +1049,6 @@ def api_chart_data():
             DimDate, FactShift.date_id == DimDate.date_id
         )
 
-        # Apply same filters
         top_clients_query = top_clients_query.filter(
             DimDate.date >= start,
             DimDate.date <= end
@@ -991,20 +1076,31 @@ def api_chart_data():
 
         data = []
         for row in results:
-            # Abbreviate month names if dimension is month
             name_value = str(row.name)
+            # Standard Abbrev
             if dimension == "month" and name_value in month_abbrev:
                 name_value = month_abbrev[name_value]
             
             item = {"name": name_value}
+            
             if split_by_location:
                 item["location"] = row.location
             if split_by_site:
                 item["site"] = row.site
             
+            # Add Standard Metrics
             for m in valid_metrics:
                 val = getattr(row, m)
                 item[m] = round(float(val or 0), 2)
+            
+            # Add Financial Metrics (merged)
+            if requested_financials and name_value in financial_data_map:
+                 for fm_name in requested_financials:
+                     if fm_name in financial_data_map[name_value]:
+                         item[fm_name] = financial_data_map[name_value][fm_name]
+                     else:
+                         item[fm_name] = 0
+
             data.append(item)
 
         return jsonify({

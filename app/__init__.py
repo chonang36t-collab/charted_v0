@@ -93,6 +93,7 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
     from .blueprints.upload import upload_bp
     from .blueprints.records import records_bp
     from .blueprints.ai_guide import ai_guide_bp
+    from .blueprints.admin_metrics import admin_metrics_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -100,6 +101,7 @@ def create_app(test_config: Optional[dict] = None) -> Flask:
     app.register_blueprint(upload_bp, url_prefix='/api')
     app.register_blueprint(records_bp)
     app.register_blueprint(ai_guide_bp, url_prefix='/api/ai-guide')
+    app.register_blueprint(admin_metrics_bp)
 
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
