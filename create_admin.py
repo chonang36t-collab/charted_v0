@@ -4,8 +4,10 @@ from app.models import User
 def create_admin_user():
     app = create_app()
     with app.app_context():
-        # Check if admin already exists
-        admin = User.query.filter_by(username='admin').first()
+        # Check if admin already exists (by username or email)
+        admin = User.query.filter(
+            (User.username == 'admin') | (User.email == 'chonang.rai@36t.com')
+        ).first()
         if admin:
             print("Admin user already exists")
             return
