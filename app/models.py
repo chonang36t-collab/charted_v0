@@ -157,4 +157,8 @@ class FinancialMetric(db.Model):
     name = db.Column(db.String(100), nullable=False) # e.g., "Overheads", "Marketing Spend"
     value = db.Column(db.Float, default=0.0)
     
+    # Granular Financials
+    location = db.Column(db.String(100), nullable=True)
+    site = db.Column(db.String(100), nullable=True)
+    
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

@@ -834,7 +834,7 @@ def api_chart_data():
 
         # Security check: Non-admins cannot access financial metrics
         if current_user.role != 'admin':
-            financial_metrics = {'revenue', 'cost', 'profit', 'profit_margin', 'avg_bill_rate', 'avg_pay_rate'}
+            financial_metrics = {'revenue', 'cost', 'profit', 'profit_margin', 'avg_bill_rate', 'avg_pay_rate', 'overheads', 'labor_cost', 'net_profit', 'gross_profit'}
             if any(m in financial_metrics for m in metrics):
                 return jsonify({"error": "Access denied: Financial metrics are restricted to administrators."}), 403
             
@@ -934,10 +934,88 @@ def api_chart_data():
         # Check for financial metrics requests (anything not in standard map)
         requested_financials = [m for m in metrics if m not in metric_map]
         
-        # If we have ONLY financial metrics, we still need a base query to get the x-axis (months/years) 
-        # OR we query FinancialMetrics directly if dimension is appropriate.
-        # For simplicity, we assume mixed or standard query drives the rows. 
-        # If ONLY financial metrics are requested, this logic needs to be smarter (fetch all months in range).
+        # Special case: If ONLY financial metrics requested (no standard metrics)
+        # We skip the FactShift query entirely and build results from FinancialMetric table
+        if not valid_metrics and requested_financials and dimension in ['month', 'year'] and not split_by_location and not split_by_site:
+            from .models import FinancialMetric
+            from datetime import datetime
+            
+            start_year = int(start[:4])
+            end_year = int(end[:4])
+            
+            # Build time periods from date range
+            start_date = datetime.strptime(start, '%Y-%m-%d')
+            end_date = datetime.strptime(end, '%Y-%m-%d')
+            
+            # Get distinct periods from DimDate
+            if dimension == 'month':
+                periods_query = db.session.query(
+                    func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY').label('period'),
+                    func.min(DimDate.date).label('min_date')
+                ).filter(
+                    DimDate.date >= start,
+                    DimDate.date <= end
+                ).group_by(func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY')).order_by('min_date')
+            else:  # year
+                periods_query = db.session.query(
+                    func.cast(DimDate.year, db.String).label('period')
+                ).filter(
+                    DimDate.date >= start,
+                    DimDate.date <= end
+                ).distinct().order_by(DimDate.year)
+            
+            periods = periods_query.all()
+            
+            # Fetch financial data
+            financial_data_map = {}
+            if 'overheads' in requested_financials:
+                fin_aggregates = db.session.query(
+                    FinancialMetric.year,
+                    FinancialMetric.month,
+                    func.sum(FinancialMetric.value).label('total')
+                ).filter(
+                    FinancialMetric.year >= start_year,
+                    FinancialMetric.year <= end_year
+                ).group_by(
+                    FinancialMetric.year,
+                    FinancialMetric.month
+                ).all()
+                
+                short_map = {
+                    "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr", 
+                    "May": "May", "June": "Jun", "July": "Jul", "August": "Aug", 
+                    "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec"
+                }
+                
+                for agg in fin_aggregates:
+                    if dimension == 'month':
+                        key = f"{short_map.get(agg.month, agg.month)} {agg.year}"
+                    else:
+                        key = str(agg.year)
+                    financial_data_map[key] = {'overheads': float(agg.total or 0)}
+            
+            # Build results
+            data = []
+            for period_row in periods:
+                period_name = period_row[0] if isinstance(period_row, tuple) else period_row.period
+                item = {"name": period_name}
+                
+                # Add financial metrics
+                if period_name in financial_data_map:
+                    for fm_name in requested_financials:
+                        item[fm_name] = financial_data_map[period_name].get(fm_name, 0)
+                else:
+                    for fm_name in requested_financials:
+                        item[fm_name] = 0
+                
+                data.append(item)
+            
+            return jsonify({
+                "data": data,
+                "summary": {
+                    "topClients": []
+                }
+            })
         
         # ... logic continues ...
         
@@ -952,7 +1030,7 @@ def api_chart_data():
         query_cols.extend(metric_cols)
 
         # Execute Main Query
-        query = db.session.query(*query_cols).join(
+        query = db.session.query(*query_cols).select_from(FactShift).join(
             DimDate, FactShift.date_id == DimDate.date_id
         )
         
@@ -1010,34 +1088,41 @@ def api_chart_data():
         
         if requested_financials and (dimension == 'month' or dimension == 'year') and not split_by_location and not split_by_site:
             from .models import FinancialMetric
-            # Fetch all financials in range? Or just all? 
             # Parse start/end year
             start_year = int(start[:4])
             end_year = int(end[:4])
             
-            fin_metrics = FinancialMetric.query.filter(
-                FinancialMetric.year >= start_year,
-                FinancialMetric.year <= end_year,
-                FinancialMetric.name.in_(requested_financials)
-            ).all()
-            
-            for fm in fin_metrics:
-                # Key format must match "Mon YYYY" or "YYYY"
-                if dimension == 'month':
-                    # FinancialMetric.month is Full Name (January), we need Short Name (Jan)
-                    # Helper map
-                    short_map = {
-                        "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr", 
-                        "May": "May", "June": "Jun", "July": "Jul", "August": "Aug", 
-                        "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec"
-                    }
-                    key = f"{short_map.get(fm.month, fm.month)} {fm.year}"
-                else: 
-                    key = str(fm.year)
+            # Aggregate ALL financial metrics as "overheads" (sum across all names)
+            if 'overheads' in requested_financials:
+                # Group by year and month, SUM all values
+                fin_aggregates = db.session.query(
+                    FinancialMetric.year,
+                    FinancialMetric.month,
+                    func.sum(FinancialMetric.value).label('total')
+                ).filter(
+                    FinancialMetric.year >= start_year,
+                    FinancialMetric.year <= end_year
+                ).group_by(
+                    FinancialMetric.year,
+                    FinancialMetric.month
+                ).all()
                 
-                if key not in financial_data_map:
-                    financial_data_map[key] = {}
-                financial_data_map[key][fm.name] = fm.value
+                for agg in fin_aggregates:
+                    # Key format must match "Mon YYYY" or "YYYY"
+                    if dimension == 'month':
+                        # FinancialMetric.month is Full Name (January), we need Short Name (Jan)
+                        short_map = {
+                            "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr", 
+                            "May": "May", "June": "Jun", "July": "Jul", "August": "Aug", 
+                            "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec"
+                        }
+                        key = f"{short_map.get(agg.month, agg.month)} {agg.year}"
+                    else: 
+                        key = str(agg.year)
+                    
+                    if key not in financial_data_map:
+                        financial_data_map[key] = {}
+                    financial_data_map[key]['overheads'] = float(agg.total or 0)
 
         # NEW: Calculate Top 3 Clients (unchanged...)
         top_clients_query = db.session.query(
