@@ -309,7 +309,7 @@ def get_target_achievement_trend():
             DimDate.year, DimDate.month, DimJob.location, DimJob.site
         ).all()
         
-        # Get targets
+        # Get targets - filter by year range
         start_year = int(start_date[:4])
         targets = ShiftTarget.query.filter(ShiftTarget.year >= start_year).all()
         
@@ -326,7 +326,8 @@ def get_target_achievement_trend():
             year, month, loc, site, actual = row
             period_key = f"{month} {year}"
             
-            # Get target (default to 1000 if not found)
+            # Get target (default to 1000 if not manually configured)
+            # This implements the business rule: 1000 shifts per site (or per location if no site)
             target = target_map.get((year, month, loc, site), 1000)
             
             if period_key not in period_data:
@@ -345,6 +346,10 @@ def get_target_achievement_trend():
             
             if actual >= target:
                 period_data[period_key]["sitesMetTarget"] += 1
+        
+        # If no data at all, return empty array rather than error
+        if not period_data:
+            return jsonify({"data": []})
         
         # Sort by date and format response
         month_order = ["January", "February", "March", "April", "May", "June",

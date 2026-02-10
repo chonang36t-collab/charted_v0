@@ -1238,7 +1238,7 @@ def api_client_distribution():
         locations = request.args.getlist("locations")
         sites = request.args.getlist("sites")
         
-        # Base Query
+        # Base Query - IMPORTANT: Filter out NULL client_ids to get actual client count
         query = db.session.query(
             func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY').label('period'),
             DimDate.year,
@@ -1246,6 +1246,8 @@ def api_client_distribution():
             func.count(func.distinct(FactShift.client_id)).label('client_count')
         ).select_from(FactShift).join(
             DimDate, FactShift.date_id == DimDate.date_id
+        ).filter(
+            FactShift.client_id.isnot(None)  # CRITICAL: Exclude NULL client_ids
         )
         
         # Joins for filters
@@ -1302,7 +1304,8 @@ def api_client_distribution():
                 "display": r.period,
                 "clientCount": r.client_count
             })
-            
+        
+        # Return empty array instead of error if no data
         return jsonify({
             "timeSeries": data,
             "aggregationLevel": "monthly"
