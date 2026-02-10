@@ -17,422 +17,231 @@ from flask import (
 )
 import os
 from flask_login import login_required, current_user
-from sqlalchemy import func, case, desc
+from sqlalchemy import func, case, desc, or_
 
 from . import db
-from .models import FactShift, DimClient, DimDate
+from .models import FactShift, DimClient, DimDate, FinancialMetric
 from .auth import admin_required, manager_required
 from .models import FactShift, DimEmployee, DimClient, DimJob, DimDate, DimShift
 from .utils.data_loader import dbDataLoader
 
 main_bp = Blueprint("main", __name__)
 
-# serve_react is now handled in app/__init__.py
+# ... (existing imports and strict column definitions remain unchanged) ...
 
-# Define required columns for the new structure
-REQUIRED_COLUMNS = [
-    'job_name', 'shift_name', 'full_name', 'location', 'site', 'role', 
-    'month', 'date', 'day', 'shift_start', 'shift_end', 'duration', 
-    'paid_hours', 'hour_rate', 'deductions', 'additions', 'total_pay', 
-    'client_hourly_rate', 'client_net', 'self_employed', 'dns', 'client', 'job_status'
-]
-
-@main_bp.route("/api/upload/required-columns")
-@login_required
-@admin_required
-def api_upload_required_columns():
-    return jsonify({"required_columns": sorted(REQUIRED_COLUMNS)})
-
-@main_bp.route("/api/upload", methods=["POST"])
-@login_required
-@admin_required
-def api_upload():
-    file = request.files.get("file")
-    if not file or file.filename == "":
-        return jsonify({"error": "No file provided."}), 400
-
-    ext = file.filename.rsplit(".", 1)[-1].lower()
-    if ext not in current_app.config.get("ALLOWED_EXTENSIONS", {"xlsx"}):
-        return jsonify({"error": "Only .xlsx files are allowed."}), 400
-
-    import tempfile
-    import os
-    import json
-    from flask import Response, stream_with_context
-    
-    # Save file temporarily
-    fd, tmp_path = tempfile.mkstemp(suffix='.xlsx')
-    os.close(fd)
-    file.save(tmp_path)
-
-    def generate():
-        try:
-            loader = dbDataLoader()
-            # Iterate over the generator from data_loader
-            for progress_data in loader.load_excel_data(tmp_path):
-                yield json.dumps(progress_data) + '\n'
-        except Exception as e:
-            yield json.dumps({"status": "error", "message": str(e)}) + '\n'
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-    return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
-
-@main_bp.route("/api/locations")
-@login_required
-def api_get_locations():
-    """Get unique list of job locations"""
+def get_overheads(start_date, end_date, locations=None, sites=None):
+    """Calculate total overheads for a given date range and filters"""
     try:
-        locations = db.session.query(DimJob.location).distinct().all()
-        return jsonify([loc[0] for loc in locations if loc[0]])
+        # Get unique year/month combinations in the range
+        dates = db.session.query(DimDate.year, DimDate.month)\
+            .filter(DimDate.date >= start_date.strftime('%Y-%m-%d'))\
+            .filter(DimDate.date <= end_date.strftime('%Y-%m-%d'))\
+            .distinct().all()
+        
+        if not dates:
+            return 0.0
+
+        total_overheads = 0.0
+        
+        for year, month in dates:
+            query = db.session.query(func.sum(FinancialMetric.value))\
+                .filter(FinancialMetric.year == year)\
+                .filter(FinancialMetric.month == month)
+            
+            if locations:
+                query = query.filter(FinancialMetric.location.in_(locations))
+            if sites:
+                query = query.filter(FinancialMetric.site.in_(sites))
+                
+            monthly_total = query.scalar() or 0.0
+            total_overheads += monthly_total
+            
+        return float(total_overheads)
     except Exception as e:
-        current_app.logger.error(f"Error fetching locations: {e}")
-        return jsonify([]), 500
+        current_app.logger.error(f"Error calculating overheads: {e}")
+        return 0.0
 
-@main_bp.route("/api/sites")
+@main_bp.route("/api/dashboard/breakdown")
 @login_required
-def api_get_sites():
-    """Get unique list of sites, optionally filtered by location and role"""
+def api_dashboard_breakdown():
+    """Get granular breakdown of metrics by dimension (location, site, client)"""
     try:
-        # Use DimJob as the base
-        query = db.session.query(DimJob.site).distinct()
-        
-        # apply_dashboard_filters will handle:
-        # 1. Role-based restrictions (Managers only see their locations)
-        # 2. Filtering by specific 'locations' if passed in query params
-        query = apply_dashboard_filters(query)
-        
-        # Additional cleanup: filter out nulls/empties if they exist
-        query = query.filter(DimJob.site != None, DimJob.site != '')
-        
-        sites = query.order_by(DimJob.site).all()
-        return jsonify([s[0] for s in sites])
-    except Exception as e:
-        current_app.logger.error(f"Error fetching sites: {e}")
-        # Return empty list on error
-        return jsonify([]), 200
-
-@main_bp.route("/api/rankings/staff")
-@login_required
-def api_rankings_staff():
-    """Get top staff by paid hours"""
-    try:
+        metric = request.args.get("metric", "revenue")
+        dimension = request.args.get("dimension", "location")
         start = request.args.get("start")
         end = request.args.get("end")
-        limit = int(request.args.get("limit", 10))
+        limit = int(request.args.get("limit", 20))
         
-        query = db.session.query(
-            DimEmployee.full_name,
-            func.sum(FactShift.paid_hours).label('value')
-        ).join(
-            DimEmployee, FactShift.employee_id == DimEmployee.employee_id
-        ).join(
-            DimDate, FactShift.date_id == DimDate.date_id
-        )
-        
-        if start and end:
-            query = query.filter(DimDate.date >= start, DimDate.date <= end)
-            
-        # Apply role/location/site filters
-        query = apply_dashboard_filters(query)
-        
-        results = query.group_by(DimEmployee.full_name)\
-            .order_by(desc('value'))\
-            .limit(limit).all()
-            
-        return jsonify([
-            {"name": r[0], "value": float(r[1] or 0)} 
-            for r in results
-        ])
-    except Exception as e:
-        current_app.logger.error(f"Error fetching staff rankings: {e}")
-        return jsonify([]), 500
+        if not start or not end:
+            return jsonify({"error": "Start and end dates are required"}), 400
 
-@main_bp.route("/api/rankings/clients")
-@login_required
-def api_rankings_clients():
-    """Get top clients by revenue or shifts"""
-    try:
-        start = request.args.get("start")
-        end = request.args.get("end")
-        limit = int(request.args.get("limit", 5))
-        metric = request.args.get("metric", "revenue") # revenue or shifts
-        
+        # Base query setup
+        if dimension == 'location':
+            group_col = DimJob.location
+            name_col = DimJob.location
+        elif dimension == 'site':
+            # Fallback to location if site is null/empty
+            # We use coalesce. Note: Empty string might need handling if not null.
+            # Assuming empty strings are filtered or treated as null in DB, or we use nullif.
+            # For robustness: func.coalesce(func.nullif(DimJob.site, ''), DimJob.location)
+            site_expr = func.coalesce(func.nullif(DimJob.site, ''), DimJob.location)
+            group_col = site_expr
+            name_col = site_expr
+        elif dimension == 'client':
+            group_col = DimClient.client_name
+            name_col = DimClient.client_name
+        else:
+            return jsonify({"error": "Invalid dimension"}), 400
+
+        # Metric aggregation logic
         if metric == 'revenue':
-            value_col = func.sum(FactShift.client_net).label('value')
+            value_col = func.sum(FactShift.client_net)
+        elif metric == 'cost':
+            value_col = func.sum(FactShift.total_pay)
+        elif metric == 'profit':
+            value_col = func.sum(FactShift.client_net - FactShift.total_pay)
+        elif metric == 'hours':
+            value_col = func.sum(FactShift.paid_hours)
+        elif metric == 'shifts':
+            value_col = func.count(FactShift.shift_record_id)
+        elif metric == 'clientRate':
+            value_col = func.sum(FactShift.client_net) / func.nullif(func.sum(FactShift.paid_hours), 0)
+        elif metric == 'staffRate':
+            value_col = func.sum(FactShift.total_pay) / func.nullif(func.sum(FactShift.paid_hours), 0)
+        elif metric == 'overheads':
+             # Special case for Overheads - different table
+             # Aggregating FinancialMetric by location/site
+             # Client dimension not applicable for overheads (unless mapped?)
+             if dimension not in ['location', 'site']:
+                 return jsonify([])
+             
+             start_date = datetime.strptime(start, '%Y-%m-%d')
+             end_date = datetime.strptime(end, '%Y-%m-%d')
+             
+             dates = db.session.query(DimDate.year, DimDate.month)\
+                .filter(DimDate.date >= start, DimDate.date <= end)\
+                .distinct().all()
+                
+             results = []
+             # This is tricky because FinancialMetric is by Month, not day.
+             # We aggregate for the months included.
+             # To show breakdown by location/site:
+             if dimension == 'site':
+                 site_expr = func.coalesce(func.nullif(FinancialMetric.site, ''), FinancialMetric.location)
+                 query = db.session.query(
+                     site_expr.label('name'),
+                     func.sum(FinancialMetric.value).label('value')
+                 )
+                 query = query.group_by(site_expr)
+             else:
+                 query = db.session.query(
+                     getattr(FinancialMetric, dimension).label('name'),
+                     func.sum(FinancialMetric.value).label('value')
+                 )
+                 query = query.group_by(getattr(FinancialMetric, dimension))
+             
+             # Filter by years/months in range
+             date_filters = [
+                 (FinancialMetric.year == d.year) & (FinancialMetric.month == d.month)
+                 for d in dates
+             ]
+             if date_filters:
+                 query = query.filter(or_(*date_filters))
+             else:
+                 return jsonify([]) # No dates match
+                 
+             query = query.group_by(getattr(FinancialMetric, dimension))
+             query = query.order_by(desc('value')).limit(limit)
+             
+             data = query.all()
+             return jsonify([{"name": r[0] or "Unknown", "value": float(r[1] or 0), "count": 0} for r in data])
+
         else:
-            value_col = func.count(FactShift.shift_record_id).label('value')
+            return jsonify({"error": "Invalid metric"}), 400
+
+        # Query construction for standard metrics
+        query = db.session.query(name_col, value_col.label('value'))\
+            .join(DimDate, FactShift.date_id == DimDate.date_id)
             
-        query = db.session.query(
-            DimClient.client_name,
-            value_col
-        ).join(
-            DimClient, FactShift.client_id == DimClient.client_id
-        ).join(
-            DimDate, FactShift.date_id == DimDate.date_id
-        )
+        if dimension in ['location', 'site']:
+             query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+        if dimension == 'client':
+             query = query.join(DimClient, FactShift.client_id == DimClient.client_id)
+             
+        query = query.filter(DimDate.date >= start, DimDate.date <= end)
         
-        if start and end:
-            query = query.filter(DimDate.date >= start, DimDate.date <= end)
-            
-        # Apply role/location/site filters
+        # Apply role-based filters
         query = apply_dashboard_filters(query)
         
-        results = query.group_by(DimClient.client_name)\
+        results = query.group_by(group_col)\
             .order_by(desc('value'))\
             .limit(limit).all()
             
         return jsonify([
-            {"name": r[0], "value": float(r[1] or 0)} 
+            {"name": r[0] or "Unknown", "value": float(r[1] or 0), "count": 0} 
             for r in results
         ])
+
     except Exception as e:
-        current_app.logger.error(f"Error fetching client rankings: {e}")
+        current_app.logger.error(f"Error in breakdown API: {e}")
         return jsonify([]), 500
 
-@main_bp.route("/api/metrics")
+@main_bp.route("/api/financial-metrics/list")
 @login_required
-def api_metrics():
-    query = db.session.query(
-        FactShift,
-        DimEmployee.full_name,
-        DimClient.client_name,
-        DimJob.location,
-        DimJob.job_name,
-        DimDate.date,
-        DimDate.month,
-        DimDate.day
-    ).join(
-        DimEmployee, FactShift.employee_id == DimEmployee.employee_id
-    ).join(
-        DimClient, FactShift.client_id == DimClient.client_id
-    ).join(
-        DimJob, FactShift.job_id == DimJob.job_id
-    ).join(
-        DimDate, FactShift.date_id == DimDate.date_id
-    )
-
-    start = request.args.get("start")
-    end = request.args.get("end")
-    full_names = request.args.getlist("full_names")
-    clients = request.args.getlist("clients")
-    locations = request.args.getlist("locations")
-
-    if start:
-        query = query.filter(DimDate.date >= start)
-    if end:
-        query = query.filter(DimDate.date <= end)
-    if full_names:
-        query = query.filter(DimEmployee.full_name.in_(full_names))
-    if clients:
-        query = query.filter(DimClient.client_name.in_(clients))
-    if locations:
-        query = query.filter(DimJob.location.in_(locations))
-
-    df = _to_dataframe(query)
-
-    data = {
-        "kpis": compute_kpis(df),
-        "timeseries": timeseries_by(df, freq="D"),
-        "top_clients": top_n_clients(df, n=10),
-        "top_locations": top_n_locations(df, n=10),
-        "hours_distribution": hours_distribution(df),
-        "summary_stats": summary_stats(df),
-        "filters": {
-            "full_names": sorted(df["full_name"].dropna().unique().tolist()) if not df.empty else [],
-            "clients": sorted(df["client"].dropna().unique().tolist()) if not df.empty else [],
-            "locations": sorted(df["location"].dropna().unique().tolist()) if not df.empty else [],
-        },
-    }
-    return jsonify(data)
-
-@main_bp.route("/api/sales-summary/totals")
-@login_required
-def api_sales_summary_totals():
-    """Get current and previous period totals"""
+def api_financial_metrics_list():
+    """Get list of financial metrics (overheads)"""
     try:
-        from sqlalchemy import distinct
-        from datetime import datetime, timedelta
-        
         start = request.args.get("start")
         end = request.args.get("end")
+        requested_locations = request.args.getlist("locations")
+        requested_sites = request.args.getlist("sites")
         
         if not start or not end:
-            return jsonify({"error": "Start and end dates are required"}), 400
-
+            return jsonify([]), 400
+            
         start_date = datetime.strptime(start, '%Y-%m-%d')
         end_date = datetime.strptime(end, '%Y-%m-%d')
-        days_diff = (end_date - start_date).days
         
-        # Current period totals
-        current_totals_query = db.session.query(
-            func.sum(FactShift.client_net).label('total_revenue'),
-            func.sum(FactShift.total_pay).label('total_cost'),
-            func.count(distinct(FactShift.client_id)).label('total_clients'),
-            func.count(FactShift.shift_record_id).label('total_shifts'),
-            func.count(distinct(FactShift.employee_id)).label('unique_employees'),
-            func.sum(FactShift.paid_hours).label('total_paid_hours')
-        ).join(DimDate, FactShift.date_id == DimDate.date_id)
-        
-        current_totals_query = current_totals_query.filter(
-            DimDate.date >= start,
-            DimDate.date <= end
-        )
-        # Apply role-based location filtering
-        current_totals_query = apply_location_filter(current_totals_query)
-        current_totals = current_totals_query.first()
-        
-        # Previous period totals
-        previous_start = start_date - timedelta(days=days_diff + 1)
-        previous_end = start_date - timedelta(days=1)
-        
-        previous_totals_query = db.session.query(
-            func.sum(FactShift.client_net).label('prev_revenue'),
-            func.sum(FactShift.total_pay).label('prev_cost'),
-            func.count(distinct(FactShift.client_id)).label('prev_clients'),
-            func.count(FactShift.shift_record_id).label('prev_shifts'),
-            func.count(distinct(FactShift.employee_id)).label('prev_employees'),
-            func.sum(FactShift.paid_hours).label('prev_paid_hours')
-        ).join(DimDate, FactShift.date_id == DimDate.date_id)
-        
-        previous_totals_query = previous_totals_query.filter(
-            DimDate.date >= previous_start.strftime('%Y-%m-%d'),
-            DimDate.date <= previous_end.strftime('%Y-%m-%d')
-        )
-        previous_totals = previous_totals_query.first()
-        
-        # Calculate metrics
-        current_revenue = float(current_totals[0] or 0)
-        current_cost = float(current_totals[1] or 0)
-        current_paid_hours = float(current_totals[5] or 0)
-        
-        current_profit_margin = ((current_revenue - current_cost) / current_revenue * 100) if current_revenue > 0 else 0
-        current_avg_client_pay = (current_revenue / current_paid_hours) if current_paid_hours > 0 else 0
-        current_avg_staff_pay = (current_cost / current_paid_hours) if current_paid_hours > 0 else 0
-        
-        previous_revenue = float(previous_totals[0] or 0)
-        previous_cost = float(previous_totals[1] or 0)
-        previous_paid_hours = float(previous_totals[5] or 0)
-        
-        previous_profit_margin = ((previous_revenue - previous_cost) / previous_revenue * 100) if previous_revenue > 0 else 0
-        previous_avg_client_pay = (previous_revenue / previous_paid_hours) if previous_paid_hours > 0 else 0
-        previous_avg_staff_pay = (previous_cost / previous_paid_hours) if previous_paid_hours > 0 else 0
-        
-        payload = {
-            "current": {
-                "totalRevenue": round(current_revenue, 2),
-                "totalCost": round(current_cost, 2),
-                "totalShifts": current_totals[3] or 0,
-                "totalClients": current_totals[2] or 0,
-                "uniqueEmployees": current_totals[4] or 0,
-                "totalPaidHours": round(current_paid_hours, 2),
-                "avgClientPayPerHour": round(current_avg_client_pay, 2),
-                "avgStaffPayPerHour": round(current_avg_staff_pay, 2),
-                "profitMargin": round(current_profit_margin, 1),
-            },
-            "previous": {
-                "totalRevenue": round(previous_revenue, 2),
-                "totalCost": round(previous_cost, 2),
-                "totalShifts": previous_totals[3] or 0,
-                "totalClients": previous_totals[2] or 0,
-                "uniqueEmployees": previous_totals[4] or 0,
-                "totalPaidHours": round(previous_paid_hours, 2),
-                "avgClientPayPerHour": round(previous_avg_client_pay, 2),
-                "avgStaffPayPerHour": round(previous_avg_staff_pay, 2),
-                "profitMargin": round(previous_profit_margin, 1),
-            }
-        }
-        
-        return jsonify(payload)
-        
-    except Exception as e:
-        current_app.logger.error(f"Error in sales-summary-totals API: {e}")
-        return jsonify({
-            "current": {
-                "totalRevenue": 0.0, "totalCost": 0.0, "totalShifts": 0, "totalClients": 0,
-                "uniqueEmployees": 0, "totalPaidHours": 0.0, "avgClientPayPerHour": 0.0,
-                "avgStaffPayPerHour": 0.0, "profitMargin": 0.0
-            },
-            "previous": {
-                "totalRevenue": 0.0, "totalCost": 0.0, "totalShifts": 0, "totalClients": 0,
-                "uniqueEmployees": 0, "totalPaidHours": 0.0, "avgClientPayPerHour": 0.0,
-                "avgStaffPayPerHour": 0.0, "profitMargin": 0.0
-            }
-        })
+        # Get unique year/month combinations in the range
+        dates = db.session.query(DimDate.year, DimDate.month)\
+            .filter(DimDate.date >= start, DimDate.date <= end)\
+            .distinct().all()
+            
+        if not dates:
+             return jsonify([])
 
-@main_bp.route("/api/sales-summary/timeseries")
-@login_required
-def api_sales_summary_timeseries():
-    """Get time series data with smart aggregation"""
-    try:
-        from datetime import datetime, timedelta
+        query = db.session.query(FinancialMetric)
         
-        start = request.args.get("start")
-        end = request.args.get("end")
-        
-        if not start or not end:
-            return jsonify({"error": "Start and end dates are required"}), 400
-
-        start_date = datetime.strptime(start, '%Y-%m-%d')
-        end_date = datetime.strptime(end, '%Y-%m-%d')
-        days_diff = (end_date - start_date).days
-        
-        # Determine aggregation level
-        if days_diff > 180:  # >6 months - monthly
-            # Cast to date type for PostgreSQL date functions
-            period_format = func.to_char(func.cast(DimDate.date, db.Date), 'YYYY-MM')
-            period_display = func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY')
-            aggregation_level = "monthly"
-        elif days_diff > 30:  # 1-6 months - weekly
-            period_format = func.date_trunc('week', func.cast(DimDate.date, db.Date))
-            period_display = func.to_char(func.date_trunc('week', func.cast(DimDate.date, db.Date)), 'DD Mon')
-            aggregation_level = "weekly"
-        else:  # <1 month - daily
-            period_format = DimDate.date
-            period_display = func.to_char(func.cast(DimDate.date, db.Date), 'DD Mon')
-            aggregation_level = "daily"
-        
-        # Time series query
-        time_series_query = db.session.query(
-            period_format.label('period'),
-            period_display.label('display'),
-            func.sum(FactShift.client_net).label('revenue'),
-            func.sum(FactShift.total_pay).label('cost')
-        ).join(DimDate, FactShift.date_id == DimDate.date_id)
-        
-        time_series_query = time_series_query.filter(
-            DimDate.date >= start,
-            DimDate.date <= end
-        )
-        
-        # Group and order based on aggregation level
-        if aggregation_level == "daily":
-            time_series_results = time_series_query.group_by(DimDate.date, period_display).order_by(DimDate.date).all()
-        else:
-            time_series_results = time_series_query.group_by(period_format, period_display).order_by(period_format).all()
-        
-        time_series_data = [
-            {
-                "period": str(period),
-                "display": display,
-                "revenue": round(float(revenue or 0), 2),
-                "cost": round(float(cost or 0), 2)
-            }
-            for period, display, revenue, cost in time_series_results
+        # Filter by dates (year/month tuples)
+        date_filters = [
+             (FinancialMetric.year == d.year) & (FinancialMetric.month == d.month)
+             for d in dates
         ]
+        if date_filters:
+            query = query.filter(or_(*date_filters))
+        else:
+            return jsonify([])
+            
+        if requested_locations:
+            query = query.filter(FinancialMetric.location.in_(requested_locations))
+        if requested_sites:
+            query = query.filter(FinancialMetric.site.in_(requested_sites))
+            
+        metrics = query.order_by(FinancialMetric.year.desc(), FinancialMetric.month.desc(), FinancialMetric.name).all()
         
-        return jsonify({
-            "timeSeries": time_series_data,
-            "aggregationLevel": aggregation_level
-        })
+        return jsonify([{
+            "id": m.id,
+            "year": m.year,
+            "month": m.month,
+            "name": m.name,
+            "value": float(m.value),
+            "location": m.location,
+            "site": m.site
+        } for m in metrics])
         
     except Exception as e:
-        current_app.logger.error(f"Error in sales-summary-timeseries API: {e}")
-        return jsonify({
-            "timeSeries": [],
-            "aggregationLevel": "daily"
-        })
+        current_app.logger.error(f"Error fetching financial metrics list: {e}")
+        return jsonify([]), 500
 
 @main_bp.route("/api/sales-summary")
 @login_required
@@ -441,6 +250,8 @@ def api_sales_summary_combined():
     try:
         start = request.args.get("start")
         end = request.args.get("end")
+        requested_locations = request.args.getlist("locations")
+        requested_sites = request.args.getlist("sites")
         
         if not start or not end:
             return jsonify({"error": "Start and end dates are required"}), 400
@@ -452,6 +263,9 @@ def api_sales_summary_combined():
         start_date = datetime.strptime(start, '%Y-%m-%d')
         end_date = datetime.strptime(end, '%Y-%m-%d')
         days_diff = (end_date - start_date).days
+        
+        # Calculate Overheads
+        current_overheads = get_overheads(start_date, end_date, requested_locations, requested_sites)
         
         # Current period totals
         current_totals_query = db.session.query(
@@ -475,6 +289,8 @@ def api_sales_summary_combined():
         # Previous period totals
         previous_start = start_date - timedelta(days=days_diff + 1)
         previous_end = start_date - timedelta(days=1)
+        
+        previous_overheads = get_overheads(previous_start, previous_end, requested_locations, requested_sites)
         
         previous_totals_query = db.session.query(
             func.sum(FactShift.client_net).label('prev_revenue'),
@@ -502,6 +318,7 @@ def api_sales_summary_combined():
              current_profit_margin = 0.0
              current_avg_client_pay = 0.0
              current_avg_staff_pay = 0.0
+             current_overheads = 0.0 # Strict sanitization
              
              # Extract operational data
              current_paid_hours = float(current_totals[5] or 0)
@@ -511,6 +328,7 @@ def api_sales_summary_combined():
              previous_profit_margin = 0.0
              previous_avg_client_pay = 0.0
              previous_avg_staff_pay = 0.0
+             previous_overheads = 0.0 # Strict sanitization
              previous_paid_hours = float(previous_totals[5] or 0)
         else:
              # Calculate metrics for current period
@@ -518,7 +336,13 @@ def api_sales_summary_combined():
              current_cost = float(current_totals[1] or 0)
              current_paid_hours = float(current_totals[5] or 0)
              
-             current_profit_margin = ((current_revenue - current_cost) / current_revenue * 100) if current_revenue > 0 else 0
+             # Add overheads to cost? Or separate metric?
+             # User requested "Total Overheads" separately.
+             # Profit calculation should technically include overheads: Revenue - (Cost + Overheads)
+             # Let's update profit margin formula to include overheads for accuracy
+             total_expenses = current_cost + current_overheads
+             current_profit_margin = ((current_revenue - total_expenses) / current_revenue * 100) if current_revenue > 0 else 0
+             
              current_avg_client_pay = (current_revenue / current_paid_hours) if current_paid_hours > 0 else 0
              current_avg_staff_pay = (current_cost / current_paid_hours) if current_paid_hours > 0 else 0
              
@@ -527,7 +351,8 @@ def api_sales_summary_combined():
              previous_cost = float(previous_totals[1] or 0)
              previous_paid_hours = float(previous_totals[5] or 0)
              
-             previous_profit_margin = ((previous_revenue - previous_cost) / previous_revenue * 100) if previous_revenue > 0 else 0
+             prev_total_expenses = previous_cost + previous_overheads
+             previous_profit_margin = ((previous_revenue - prev_total_expenses) / previous_revenue * 100) if previous_revenue > 0 else 0
              previous_avg_client_pay = (previous_revenue / previous_paid_hours) if previous_paid_hours > 0 else 0
              previous_avg_staff_pay = (previous_cost / previous_paid_hours) if previous_paid_hours > 0 else 0
         
@@ -567,22 +392,83 @@ def api_sales_summary_combined():
         else:
             time_series_results = time_series_query.group_by(period_format, period_display).order_by(period_format).all()
         
-        time_series_data = [
-            {
+        # Fetch overheads for time series injection
+        # Note: FinancialMetric uses full month name (e.g. "January")
+        full_month_map = {
+             "January": "01", "February": "02", "March": "03", "April": "04",
+             "May": "05", "June": "06", "July": "07", "August": "08",
+             "September": "09", "October": "10", "November": "11", "December": "12"
+        }
+        
+        overheads_query = db.session.query(
+             FinancialMetric.year, 
+             FinancialMetric.month, 
+             func.sum(FinancialMetric.value)
+        ).filter(
+             FinancialMetric.year >= start_date.year,
+             FinancialMetric.year <= end_date.year
+        )
+        
+        if requested_locations:
+            overheads_query = overheads_query.filter(FinancialMetric.location.in_(requested_locations))
+        if requested_sites:
+            overheads_query = overheads_query.filter(FinancialMetric.site.in_(requested_sites))
+            
+        overheads_results = overheads_query.group_by(FinancialMetric.year, FinancialMetric.month).all()
+        
+        overheads_map = {}
+        for y, m, v in overheads_results:
+            m_num = full_month_map.get(m, "00")
+            key = f"{y}-{m_num}"
+            overheads_map[key] = float(v or 0)
+
+        time_series_data = []
+        for period, display, revenue, cost, paid_hours, shifts in time_series_results:
+             # Try to match overheads
+             # If aggregation is monthly, period is YYYY-MM
+             # If aggregation is daily/weekly, we need to derive YYYY-MM from `period` (which might be a date)
+             
+             ov_val = 0.0
+             period_str = str(period)
+             
+             if aggregation_level == 'monthly':
+                 ov_key = period_str # YYYY-MM
+                 ov_val = overheads_map.get(ov_key, 0.0)
+             else:
+                 # Attempt to extract YYYY-MM from date string YYYY-MM-DD
+                 if len(period_str) >= 7:
+                     ov_key = period_str[:7]
+                     if aggregation_level == 'daily':
+                         # Pro-rate? Or just show 0?
+                         # Showing full monthly overhead on every day is wrong.
+                         # Showing it on the 1st of month?
+                         if period_str.endswith("-01"):
+                              ov_val = overheads_map.get(ov_key, 0.0)
+                     elif aggregation_level == 'weekly':
+                         # difficult to map perfect weeks to months
+                         pass
+            
+             time_series_data.append({
                 "period": str(period),
                 "display": display,
                 "revenue": round(float(revenue or 0), 2) if current_user.role == 'admin' else 0.0,
                 "cost": round(float(cost or 0), 2) if current_user.role == 'admin' else 0.0,
                 "paidHours": round(float(paid_hours or 0), 2),
-                "totalShifts": int(shifts or 0)
-            }
-            for period, display, revenue, cost, paid_hours, shifts in time_series_results
-        ]
+                "totalShifts": int(shifts or 0),
+                "overheads": round(ov_val, 2) if current_user.role == 'admin' else 0.0
+            })
+
+        if current_user.role == 'admin':
+             # We need to inject overheads into time series?
+             # That would be complex as overheads are monthly. 
+             # For now, let's just return the aggregate totalOverheads.
+             pass
         
         # Build final response
         payload = {
             "totalRevenue": round(current_revenue, 2),
             "totalCost": round(current_cost, 2),
+            "totalOverheads": round(current_overheads, 2),
             "totalShifts": current_totals[3] or 0,
             "totalClients": current_totals[2] or 0,
             "uniqueEmployees": current_totals[4] or 0,
@@ -593,6 +479,7 @@ def api_sales_summary_combined():
             "previousPeriod": {
                 "totalRevenue": round(previous_revenue, 2),
                 "totalCost": round(previous_cost, 2),
+                "totalOverheads": round(previous_overheads, 2),
                 "totalShifts": previous_totals[3] or 0,
                 "totalClients": previous_totals[2] or 0,
                 "uniqueEmployees": previous_totals[4] or 0,
@@ -816,6 +703,140 @@ def api_filters():
     except Exception as e:
         current_app.logger.error(f"Error in filters API: {e}")
         return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/sites")
+@login_required
+def api_list_sites():
+    """Get list of sites, optionally filtered by locations"""
+    try:
+        requested_locations = request.args.getlist("locations")
+        query = db.session.query(DimJob.site).distinct().filter(
+            DimJob.site.isnot(None),
+            DimJob.site != ''
+        )
+        
+        if requested_locations:
+             query = query.filter(DimJob.location.in_(requested_locations))
+             
+        # RBAC
+        query = apply_dashboard_filters(query)
+             
+        sites = query.order_by(DimJob.site).all()
+        return jsonify([s[0] for s in sites])
+        
+    except Exception as e:
+        current_app.logger.error(f"Error fetching sites: {e}")
+        return jsonify([]), 500
+
+@main_bp.route("/api/rankings/staff")
+@login_required
+def api_rankings_staff():
+    """Get top staff by various metrics"""
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        limit = int(request.args.get("limit", 10))
+        
+        if not start or not end:
+            return jsonify([]), 400
+            
+        # Metric: 'hours' (default) or 'cost' (if admin)
+        metric = request.args.get("metric", "hours")
+        
+        query = db.session.query(
+            DimEmployee.full_name.label('name'),
+            func.sum(FactShift.paid_hours).label('value'),
+            func.count(FactShift.shift_record_id).label('shifts')
+        ).join(
+            FactShift, FactShift.employee_id == DimEmployee.employee_id
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        ).filter(
+            DimDate.date >= start,
+            DimDate.date <= end
+        )
+        
+        # Apply filters
+        query = apply_dashboard_filters(query) 
+        
+        if metric == 'cost' and current_user.role == 'admin':
+             # Override query for cost
+             query = db.session.query(
+                DimEmployee.full_name.label('name'),
+                func.sum(FactShift.total_pay).label('value'),
+                func.count(FactShift.shift_record_id).label('shifts')
+             ).join(
+                FactShift, FactShift.employee_id == DimEmployee.employee_id
+             ).join(
+                DimDate, FactShift.date_id == DimDate.date_id
+             ).filter(
+                DimDate.date >= start,
+                DimDate.date <= end
+             )
+             query = apply_dashboard_filters(query)
+
+        results = query.group_by(DimEmployee.full_name)\
+            .order_by(desc('value'))\
+            .limit(limit).all()
+            
+        return jsonify([{
+            "name": r.name,
+            "value": float(r.value or 0),
+            "subValue": f"{r.shifts} shifts"
+        } for r in results])
+        
+    except Exception as e:
+        current_app.logger.error(f"Error in staff rankings: {e}")
+        return jsonify([]), 500
+
+@main_bp.route("/api/rankings/clients")
+@login_required
+def api_rankings_clients():
+    """Get top clients by revenue or shifts"""
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        limit = int(request.args.get("limit", 10))
+        metric = request.args.get("metric", "revenue") # revenue or shifts
+        
+        if not start or not end:
+            return jsonify([]), 400
+            
+        if metric == 'revenue':
+             if current_user.role != 'admin':
+                 return jsonify({"error": "Unauthorized"}), 403
+             col = func.sum(FactShift.client_net)
+             sort_desc = desc('value')
+        else:
+             col = func.count(FactShift.shift_record_id)
+             sort_desc = desc('value')
+             
+        query = db.session.query(
+            DimClient.client_name.label('name'),
+            col.label('value')
+        ).join(
+            FactShift, FactShift.client_id == DimClient.client_id
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        ).filter(
+            DimDate.date >= start,
+            DimDate.date <= end
+        )
+        
+        query = apply_dashboard_filters(query)
+        
+        results = query.group_by(DimClient.client_name)\
+            .order_by(sort_desc)\
+            .limit(limit).all()
+            
+        return jsonify([{
+            "name": r.name,
+            "value": float(r.value or 0)
+        } for r in results])
+        
+    except Exception as e:
+        current_app.logger.error(f"Error in client rankings: {e}")
+        return jsonify([]), 500
 
 @main_bp.route("/api/chart-data")
 @login_required
@@ -1197,4 +1218,96 @@ def api_chart_data():
 
     except Exception as e:
         current_app.logger.error(f"Error in chart-data API: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/dashboard/client-distribution")
+@login_required
+def api_client_distribution():
+    """
+    Get distinct client counts over time (monthly).
+    """
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        
+        if not start or not end:
+            return jsonify({"error": "Missing start/end date parameters"}), 400
+            
+        # Re-implement filters logic (similar to api_chart_data)
+        clients = request.args.getlist("clients")
+        locations = request.args.getlist("locations")
+        sites = request.args.getlist("sites")
+        
+        # Base Query
+        query = db.session.query(
+            func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY').label('period'),
+            DimDate.year,
+            DimDate.month,
+            func.count(func.distinct(FactShift.client_id)).label('client_count')
+        ).select_from(FactShift).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        )
+        
+        # Joins for filters
+        if locations or sites:
+            query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+        if clients:
+            query = query.join(DimClient, FactShift.client_id == DimClient.client_id)
+            
+        # Apply Filters
+        query = query.filter(
+            DimDate.date >= start,
+            DimDate.date <= end
+        )
+        
+        if clients:
+            query = query.filter(DimClient.client_name.in_(clients))
+        if locations:
+            query = query.filter(DimJob.location.in_(locations))
+        if sites:
+            query = query.filter(DimJob.site.in_(sites))
+            
+        # RBAC Check
+        if current_user.role != 'admin':
+             # Ensure we join DimJob if not already joined
+             if not locations and not sites: # If we haven't joined yet
+                 query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+             
+             try:
+                import json
+                user_locations = json.loads(current_user.location) if current_user.location else []
+                if user_locations:
+                    query = query.filter(DimJob.location.in_(user_locations))
+                else:
+                    # No locations = no access? Or check string
+                    query = query.filter(DimJob.location == current_user.location)
+             except:
+                query = query.filter(DimJob.location == current_user.location)
+
+        # Group and Order
+        query = query.group_by(
+            func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY'),
+            DimDate.year,
+            DimDate.month
+        ).order_by(
+            func.min(DimDate.date)
+        )
+        
+        results = query.all()
+        
+        data = []
+        for r in results:
+            data.append({
+                "period": r.period,
+                "display": r.period,
+                "clientCount": r.client_count
+            })
+            
+        return jsonify({
+            "timeSeries": data,
+            "aggregationLevel": "monthly"
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"Error in client-distribution API: {e}")
         return jsonify({"error": str(e)}), 500

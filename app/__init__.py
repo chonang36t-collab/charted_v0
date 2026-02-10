@@ -25,6 +25,12 @@ login_manager.login_message_category = "warning"
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+@login_manager.unauthorized_handler
+def unauthorized():
+    if request.path.startswith('/api'):
+        return jsonify({"error": "Unauthorized"}), 401
+    return redirect(url_for('auth.login', next=request.path))
+
 
 def create_app(test_config: Optional[dict] = None) -> Flask:
     """Application factory."""

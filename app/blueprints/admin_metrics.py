@@ -63,81 +63,86 @@ def set_target():
             db.session.add(target)
             
         db.session.commit()
-        return jsonify({"message": "Target saved play"}), 200
+        return jsonify({"message": "Target saved successfully"}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
-@admin_metrics_bp.route("/api/admin/financial-metrics", methods=["GET", "POST"])
+@admin_metrics_bp.route("/api/admin/financial-metrics", methods=["GET"])
 @login_required
 @admin_required
-def handle_financial_metrics():
+def get_financial_metrics():
     try:
-        if request.method == "GET":
-            year = request.args.get('year', type=int)
-            query = FinancialMetric.query
-            location = request.args.get('location')
-            site = request.args.get('site')
+        year = request.args.get('year', type=int)
+        
+        query = FinancialMetric.query
+        if year:
+            query = query.filter_by(year=year)
             
-            if year:
-                query = query.filter_by(year=year)
-            
-            # Optional filters for granular data
-            if location:
-                 query = query.filter_by(location=location)
-            # If site passed, filter by site. If not, maybe return all?
-            if site:
-                 query = query.filter_by(site=site)
-                 
-            metrics = query.all()
-            return jsonify([{
-                "id": m.id,
-                "year": m.year,
-                "month": m.month,
-                "name": m.name,
-                "value": m.value,
-                "location": m.location,
-                "site": m.site
-            } for m in metrics])
-            
-        elif request.method == "POST":
-            data = request.json
-            # Expect: year, month, name, value, location (optional), site (optional)
-            
-            # Normalize site and location: empty string -> None
-            site_val = data.get('site')
-            if site_val == "":
-                site_val = None
-                
-            loc_val = data.get('location')
-            if loc_val == "":
-                loc_val = None
+        metrics = query.all()
+        return jsonify([{
+            "id": m.id,
+            "year": m.year,
+            "month": m.month,
+            "name": m.name,
+            "value": m.value,
+            "location": m.location,
+            "site": m.site
+        } for m in metrics])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-            # Upsert logic based on composite key
-            metric = FinancialMetric.query.filter_by(
+@admin_metrics_bp.route("/api/admin/financial-metrics", methods=["POST"])
+@login_required
+@admin_required
+def set_financial_metric():
+    try:
+        data = request.json
+        
+        # Normalize empty strings to None
+        location_val = data.get('location') if data.get('location') else None
+        site_val = data.get('site') if data.get('site') else None
+        
+        # Check if exists
+        metric = FinancialMetric.query.filter_by(
+            year=data['year'],
+            month=data['month'],
+            name=data['name'],
+            location=location_val,
+            site=site_val
+        ).first()
+        
+        if metric:
+            metric.value = data['value']
+        else:
+            metric = FinancialMetric(
                 year=data['year'],
                 month=data['month'],
                 name=data['name'],
-                location=loc_val,
+                value=data['value'],
+                location=location_val,
                 site=site_val
-            ).first()
+            )
+            db.session.add(metric)
             
-            if metric:
-                metric.value = float(data['value'])
-            else:
-                metric = FinancialMetric(
-                    year=data['year'],
-                    month=data['month'],
-                    name=data['name'],
-                    value=float(data['value']),
-                    location=loc_val,
-                    site=site_val
-                )
-                db.session.add(metric)
+        db.session.commit()
+        return jsonify({"message": "Financial metric saved successfully"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@admin_metrics_bp.route("/api/admin/financial-metrics/<int:id>", methods=["DELETE"])
+@login_required
+@admin_required
+def delete_financial_metric(id):
+    try:
+        metric = FinancialMetric.query.get(id)
+        if not metric:
+            return jsonify({"error": "Metric not found"}), 404
             
-            db.session.commit()
-            return jsonify({"message": "Metric saved"}), 200
-            
+        db.session.delete(metric)
+        db.session.commit()
+        return jsonify({"message": "Metric deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
@@ -252,6 +257,120 @@ def get_target_performance():
             })
 
         return jsonify(performance)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@admin_metrics_bp.route("/api/dashboard/target-achievement-trend", methods=["GET"])
+@login_required
+def get_target_achievement_trend():
+    """
+    Returns achievement percentage trend over time.
+    Aggregates all sites per period to show overall achievement %.
+    """
+    try:
+        start_date = request.args.get('start')  # YYYY-MM-DD
+        end_date = request.args.get('end')
+        
+        if not start_date or not end_date:
+            return jsonify({"error": "start and end dates required"}), 400
+        
+        # Get actual performance data
+        actual_query = db.session.query(
+            DimDate.year,
+            DimDate.month,
+            DimJob.location,
+            DimJob.site,
+            func.count(FactShift.shift_record_id).label('actual_count')
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        ).join(
+            DimJob, FactShift.job_id == DimJob.job_id
+        ).filter(
+            DimDate.date >= start_date,
+            DimDate.date <= end_date
+        )
+
+        # RBAC Filter
+        if current_user.role not in ['admin', 'superadmin']:
+            if current_user.location:
+                import json
+                try:
+                    user_locs = json.loads(current_user.location)
+                    if isinstance(user_locs, list):
+                        actual_query = actual_query.filter(DimJob.location.in_(user_locs))
+                    else:
+                        actual_query = actual_query.filter(DimJob.location == str(user_locs))
+                except (json.JSONDecodeError, TypeError):
+                     actual_query = actual_query.filter(DimJob.location == current_user.location)
+        
+        actual_query = actual_query.group_by(
+            DimDate.year, DimDate.month, DimJob.location, DimJob.site
+        ).all()
+        
+        # Get targets
+        start_year = int(start_date[:4])
+        targets = ShiftTarget.query.filter(ShiftTarget.year >= start_year).all()
+        
+        # Build target map
+        target_map = {}
+        for t in targets:
+            key = (t.year, t.month, t.location, t.site)
+            target_map[key] = t.target_count
+        
+        # Aggregate by period (year-month)
+        period_data = {}
+        
+        for row in actual_query:
+            year, month, loc, site, actual = row
+            period_key = f"{month} {year}"
+            
+            # Get target (default to 1000 if not found)
+            target = target_map.get((year, month, loc, site), 1000)
+            
+            if period_key not in period_data:
+                period_data[period_key] = {
+                    "year": year,
+                    "month": month,
+                    "totalActual": 0,
+                    "totalTarget": 0,
+                    "sitesMetTarget": 0,
+                    "totalSites": 0
+                }
+            
+            period_data[period_key]["totalActual"] += actual
+            period_data[period_key]["totalTarget"] += target
+            period_data[period_key]["totalSites"] += 1
+            
+            if actual >= target:
+                period_data[period_key]["sitesMetTarget"] += 1
+        
+        # Sort by date and format response
+        month_order = ["January", "February", "March", "April", "May", "June",
+                       "July", "August", "September", "October", "November", "December"]
+        
+        sorted_data = sorted(
+            period_data.values(),
+            key=lambda x: (x["year"], month_order.index(x["month"]))
+        )
+        
+        # Calculate achievement percentage
+        result = []
+        for item in sorted_data:
+            achievement_pct = (item["sitesMetTarget"] / item["totalSites"] * 100) if item["totalSites"] > 0 else 0
+            
+            result.append({
+                "period": f"{item['month'][:3]} {item['year']}",
+                "display": f"{item['month'][:3]} {item['year']}",
+                "achievementPercentage": round(achievement_pct, 1),
+                "sitesMetTarget": item["sitesMetTarget"],
+                "totalSites": item["totalSites"],
+                "totalActual": item["totalActual"],
+                "totalTarget": item["totalTarget"]
+            })
+        
+        return jsonify({"data": result})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
