@@ -155,13 +155,30 @@ def api_dashboard_breakdown():
              
              data = query.all()
              return jsonify([{"name": r[0] or "Unknown", "value": float(r[1] or 0), "count": 0} for r in data])
-
+        elif metric == 'clients':
+             # For client metric, behavior depends on dimension:
+             # - By location/site: count distinct clients in that location/site
+             # - By client: count distinct sites where that client was active
+             if dimension == 'client':
+                 value_col = func.count(func.distinct(DimJob.site))  # Sites per client
+             else:
+                 value_col = func.count(func.distinct(FactShift.client_id))  # Clients per location/site
+        elif metric == 'employees':
+             # Count distinct employees
+             value_col = func.count(func.distinct(FactShift.employee_id))
         else:
             return jsonify({"error": "Invalid metric"}), 400
 
         # Query construction for standard metrics
         query = db.session.query(name_col, value_col.label('value'))\
             .join(DimDate, FactShift.date_id == DimDate.date_id)
+        
+        # Filter out NULL client_ids for client counting
+        if metric == 'clients':
+            query = query.filter(FactShift.client_id.isnot(None))
+            # Need DimJob join when counting sites per client
+            if dimension == 'client':
+                query = query.join(DimJob, FactShift.job_id == DimJob.job_id, isouter=False)
             
         if dimension in ['location', 'site']:
              query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
@@ -1240,7 +1257,8 @@ def api_client_distribution():
         
         # Base Query - IMPORTANT: Filter out NULL client_ids to get actual client count
         query = db.session.query(
-            func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY').label('period'),
+            func.to_char(func.cast(DimDate.date, db.Date), 'YYYY-MM').label('period'),
+            func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY').label('display'),
             DimDate.year,
             DimDate.month,
             func.count(func.distinct(FactShift.client_id)).label('client_count')
@@ -1251,8 +1269,10 @@ def api_client_distribution():
         )
         
         # Joins for filters
+        job_joined = False
         if locations or sites:
             query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            job_joined = True
         if clients:
             query = query.join(DimClient, FactShift.client_id == DimClient.client_id)
             
@@ -1272,7 +1292,7 @@ def api_client_distribution():
         # RBAC Check
         if current_user.role != 'admin':
              # Ensure we join DimJob if not already joined
-             if not locations and not sites: # If we haven't joined yet
+             if not job_joined:
                  query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
              
              try:
@@ -1288,6 +1308,7 @@ def api_client_distribution():
 
         # Group and Order
         query = query.group_by(
+            func.to_char(func.cast(DimDate.date, db.Date), 'YYYY-MM'),
             func.to_char(func.cast(DimDate.date, db.Date), 'Mon YYYY'),
             DimDate.year,
             DimDate.month
@@ -1300,8 +1321,8 @@ def api_client_distribution():
         data = []
         for r in results:
             data.append({
-                "period": r.period,
-                "display": r.period,
+                "period": r.period,     # YYYY-MM format for matching with operational data
+                "display": r.display,    # Mon YYYY format for display
                 "clientCount": r.client_count
             })
         

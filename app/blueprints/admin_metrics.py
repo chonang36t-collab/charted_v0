@@ -322,9 +322,17 @@ def get_target_achievement_trend():
         # Aggregate by period (year-month)
         period_data = {}
         
+        # Month name to number mapping
+        month_to_num = {
+            "January": "01", "February": "02", "March": "03", "April": "04",
+            "May": "05", "June": "06", "July": "07", "August": "08",
+            "September": "09", "October": "10", "November": "11", "December": "12"
+        }
+        
         for row in actual_query:
             year, month, loc, site, actual = row
-            period_key = f"{month} {year}"
+            month_num = month_to_num.get(month, "01")
+            period_key = f"{year}-{month_num}"  # YYYY-MM format to match operational-summary
             
             # Get target (default to 1000 if not manually configured)
             # This implements the business rule: 1000 shifts per site (or per location if no site)
@@ -364,10 +372,11 @@ def get_target_achievement_trend():
         result = []
         for item in sorted_data:
             achievement_pct = (item["sitesMetTarget"] / item["totalSites"] * 100) if item["totalSites"] > 0 else 0
+            month_num = month_to_num.get(item["month"], "01")
             
             result.append({
-                "period": f"{item['month'][:3]} {item['year']}",
-                "display": f"{item['month'][:3]} {item['year']}",
+                "period": f"{item['year']}-{month_num}",  # YYYY-MM format for matching
+                "display": f"{item['month'][:3]} {item['year']}",  # Mon YYYY for display
                 "achievementPercentage": round(achievement_pct, 1),
                 "sitesMetTarget": item["sitesMetTarget"],
                 "totalSites": item["totalSites"],
