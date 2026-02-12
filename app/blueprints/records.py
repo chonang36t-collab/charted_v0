@@ -322,3 +322,60 @@ def delete_record(id):
         db.session.rollback()
         current_app.logger.error(f"Delete error: {e}")
         return jsonify({"error": str(e)}), 500
+
+@records_bp.route("/api/records/bulk", methods=["DELETE"])
+@login_required
+@manager_required
+def delete_records_bulk():
+    """
+    Delete multiple shift records in bulk.
+    RBAC: Validates user can only delete records from their assigned locations.
+    
+    Request body: {"record_ids": [1, 2, 3, ...]}
+    Response: {"deleted": count}
+    """
+    try:
+        data = request.get_json()
+        record_ids = data.get('record_ids', [])
+        
+        if not record_ids or not isinstance(record_ids, list):
+            return jsonify({"error": "Invalid record_ids parameter"}), 400
+        
+        # Fetch records with their job locations
+        records = db.session.query(FactShift, DimJob.location).join(
+            DimJob, FactShift.job_id == DimJob.job_id
+        ).filter(
+            FactShift.shift_record_id.in_(record_ids)
+        ).all()
+        
+        if not records:
+            return jsonify({"error": "No records found"}), 404
+        
+        # RBAC: Filter by user's locations if not admin
+        if current_user.role != 'admin':
+            try:
+                import json
+                user_locations = json.loads(current_user.location) if current_user.location else []
+                
+                # Validate all records are from user's locations
+                for record, location in records:
+                    if location and location not in user_locations:
+                        return jsonify({"error": "Unauthorized to delete some records"}), 403
+            except Exception as e:
+                current_app.logger.error(f"RBAC validation error: {e}")
+                return jsonify({"error": "Permission validation failed"}), 500
+        
+        # Delete records
+        deleted_count = 0
+        for record, _ in records:
+            db.session.delete(record)
+            deleted_count += 1
+        
+        db.session.commit()
+        
+        return jsonify({"deleted": deleted_count}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Bulk delete error: {e}")
+        return jsonify({"error": str(e)}), 500

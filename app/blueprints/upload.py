@@ -29,9 +29,13 @@ def upload_file():
         file_path = os.path.join(upload_folder, filename)
         file.save(file_path)
         
+        # Extract exclusions from form data (sent from frontend)
+        import json
+        excluded_locations = json.loads(request.form.get('excluded_locations', '[]'))
+        excluded_clients = json.loads(request.form.get('excluded_clients', '[]'))
+        
         def generate_response():
-            loader = dbDataLoader()
-            import json
+            loader = dbDataLoader(excluded_locations, excluded_clients)
             try:
                 # Iterate through the generator
                 for status_update in loader.load_excel_data(file_path):

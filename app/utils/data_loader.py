@@ -4,9 +4,12 @@ import os
 from sqlalchemy import text
 from app.models import db, DimEmployee, DimClient, DimJob, DimShift, DimDate, FactShift
 
-class dbDataLoader:
-    def __init__(self):
+class dbDataLoader:    
+    def __init__(self, excluded_locations=None, excluded_clients=None):
         self.db_type = "PostgreSQL"
+        # Accept exclusions from caller, default to empty lists
+        self.excluded_locations = excluded_locations or []
+        self.excluded_clients = excluded_clients or []
     
     def load_excel_data(self, file_path):
         """BULK load Excel data - generator for progress updates"""
@@ -18,6 +21,12 @@ class dbDataLoader:
             yield {"status": "progress", "message": "📄 Reading Excel file...", "progress": 5}
             df = pd.read_excel(file_path)
             yield {"status": "progress", "message": f"✓ Loaded {len(df):,} rows from Excel", "progress": 10}
+            
+            # Filter out unwanted data
+            yield {"status": "progress", "message": "🔍 Filtering unwanted data...", "progress": 12}
+            df, filtered_count = self._filter_unwanted_data(df)
+            if filtered_count > 0:
+                yield {"status": "progress", "message": f"✓ Filtered {filtered_count:,} unwanted records (excluded locations/clients)", "progress": 14}
             
             # Validate required columns
             required_columns = [
@@ -482,6 +491,21 @@ class dbDataLoader:
                 print(f"Inserted batch {i//batch_size + 1}: {len(batch):,} records")
         
         return total_inserted, skipped_details
+    
+    def _filter_unwanted_data(self, df):
+        """Filter out rows with excluded locations or clients"""
+        original_count = len(df)
+        
+        # Filter out excluded locations (case-insensitive)
+        if 'location' in df.columns:
+            df = df[~df['location'].fillna('').str.upper().isin([loc.upper() for loc in self.EXCLUDED_LOCATIONS])]
+        
+        # Filter out excluded clients (case-insensitive)
+        if 'client' in df.columns:
+            df = df[~df['client'].fillna('').str.upper().isin([client.upper() for client in self.EXCLUDED_CLIENTS])]
+        
+        filtered_count = original_count - len(df)
+        return df, filtered_count
     
     def _clean_string(self, value, default=""):
         """Clean string values, handle NaN and None"""
