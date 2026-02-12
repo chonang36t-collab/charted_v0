@@ -533,9 +533,8 @@ from .utils.filters import apply_dashboard_filters
 
 @main_bp.route("/api/financial-summary")
 @login_required
-@admin_required
 def api_financial_summary():
-    """Admin-only summary with full financial data"""
+    """Financial summary with RBAC filtering for non-admin users"""
     return api_sales_summary_combined()
 
 @main_bp.route("/api/operational-summary")
@@ -820,8 +819,6 @@ def api_rankings_clients():
             return jsonify([]), 400
             
         if metric == 'revenue':
-             if current_user.role != 'admin':
-                 return jsonify({"error": "Unauthorized"}), 403
              col = func.sum(FactShift.client_net)
              sort_desc = desc('value')
         else:
@@ -1342,7 +1339,12 @@ def api_client_revenue_tiers():
     """
     Segment clients into revenue tiers (Top 20%, Mid-tier, Low-value)
     based on total revenue contribution within the date range.
+    ADMIN ONLY - Contains sensitive revenue data.
     """
+    # RESTRICT TO ADMIN ONLY
+    if current_user.role != 'admin':
+        return jsonify({"error": "Admin access required"}), 403
+    
     try:
         start = request.args.get("start")
         end = request.args.get("end")
@@ -1462,4 +1464,107 @@ def api_client_revenue_tiers():
     
     except Exception as e:
         current_app.logger.error(f"Error in client-revenue-tiers API: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/dashboard/client-workload-scatter")
+@login_required
+def api_client_workload_scatter():
+    """
+    Get client workload vs staff coverage data for scatter chart.
+    Returns total hours, distinct staff count, and shift count per client with medians.
+    """
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        
+        if not start or not end:
+            return jsonify({"error": "Missing start/end date parameters"}), 400
+        
+        # Get filters
+        locations = request.args.getlist("locations")
+        sites = request.args.getlist("sites")
+        
+        # Query: Aggregate by client
+        base_query = db.session.query(
+            DimClient.client_name.label('client_name'),
+            func.sum(FactShift.paid_hours).label('total_hours'),
+            func.count(func.distinct(FactShift.employee_id)).label('staff_count'),
+            func.count(FactShift.shift_record_id).label('shift_count')
+        ).select_from(FactShift)\
+        .join(DimDate, FactShift.date_id == DimDate.date_id)\
+        .join(DimClient, FactShift.client_id == DimClient.client_id)\
+        .filter(
+            FactShift.client_id.isnot(None),
+            DimDate.date >= start,
+            DimDate.date <= end
+        )
+        
+        # Apply location/site filters
+        if locations or sites:
+            base_query = base_query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            if locations:
+                base_query = base_query.filter(DimJob.location.in_(locations))
+            if sites:
+                base_query = base_query.filter(DimJob.site.in_(sites))
+        
+        # RBAC: Filter by user's locations if not admin
+        if current_user.role != 'admin':
+            if not (locations or sites):
+                # Join DimJob if not already joined
+                base_query = base_query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            
+            try:
+                import json
+                user_locations = json.loads(current_user.location) if current_user.location else []
+                if user_locations:
+                    base_query = base_query.filter(DimJob.location.in_(user_locations))
+            except:
+                pass
+        
+        # Group by client
+        base_query = base_query.group_by(DimClient.client_name)
+        results = base_query.all()
+        
+        if not results:
+            return jsonify({"data": [], "medians": {"hours": 0, "staffCount": 0}})
+        
+        # Calculate medians
+        hours_list = sorted([float(r.total_hours) for r in results])
+        staff_list = sorted([int(r.staff_count) for r in results])
+        
+        def percentile(data, p):
+            n = len(data)
+            if n == 0:
+                return 0
+            k = (n - 1) * p
+            f = int(k)
+            c = k - f
+            if f + 1 < n:
+                return data[f] + c * (data[f + 1] - data[f])
+            else:
+                return data[f]
+        
+        median_hours = percentile(hours_list, 0.5)
+        median_staff = percentile(staff_list, 0.5)
+        
+        # Format response
+        data = []
+        for r in results:
+            data.append({
+                "clientName": r.client_name,
+                "totalHours": round(float(r.total_hours), 2),
+                "staffCount": int(r.staff_count),
+                "shiftCount": int(r.shift_count)
+            })
+        
+        return jsonify({
+            "data": data,
+            "medians": {
+                "hours": round(median_hours, 2),
+                "staffCount": round(median_staff, 1)
+            }
+        })
+    
+    except Exception as e:
+        current_app.logger.error(f"Error in client-workload-scatter API: {e}")
         return jsonify({"error": str(e)}), 500
