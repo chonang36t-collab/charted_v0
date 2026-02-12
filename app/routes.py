@@ -1335,3 +1335,131 @@ def api_client_distribution():
     except Exception as e:
         current_app.logger.error(f"Error in client-distribution API: {e}")
         return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/dashboard/client-revenue-tiers")
+@login_required
+def api_client_revenue_tiers():
+    """
+    Segment clients into revenue tiers (Top 20%, Mid-tier, Low-value)
+    based on total revenue contribution within the date range.
+    """
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        
+        if not start or not end:
+            return jsonify({"error": "Missing start/end date parameters"}), 400
+        
+        # Get filters
+        locations = request.args.getlist("locations")
+        sites = request.args.getlist("sites")
+        
+        # Step 1: Calculate revenue per client
+        base_query = db.session.query(
+            DimClient.client_name.label('client_name'),
+            func.sum(FactShift.client_net).label('total_revenue')
+        ).select_from(FactShift)\
+        .join(DimDate, FactShift.date_id == DimDate.date_id)\
+        .join(DimClient, FactShift.client_id == DimClient.client_id)\
+        .filter(
+            FactShift.client_id.isnot(None),
+            FactShift.client_net.isnot(None),
+            DimDate.date >= start,
+            DimDate.date <= end
+        )
+        
+        # Apply location/site filters
+        if locations or sites:
+            base_query = base_query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            if locations:
+                base_query = base_query.filter(DimJob.location.in_(locations))
+            if sites:
+                base_query = base_query.filter(DimJob.site.in_(sites))
+        
+        # RBAC: Filter by user's locations if not admin
+        if current_user.role != 'admin':
+            if not (locations or sites):
+                # Join DimJob if not already joined
+                base_query = base_query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            
+            try:
+                import json
+                user_locations = json.loads(current_user.location) if current_user.location else []
+                if user_locations:
+                    base_query = base_query.filter(DimJob.location.in_(user_locations))
+            except:
+                pass
+        
+        # Group by client
+        base_query = base_query.group_by(DimClient.client_name)
+        client_revenues = base_query.all()
+        
+        if not client_revenues:
+            return jsonify({"tiers": []})
+        
+        # Step 2: Calculate percentiles using Python (SQLAlchemy's percentile_cont is complex)
+        revenues = [float(r.total_revenue) for r in client_revenues]
+        revenues.sort()
+        
+        # Calculate 50th and 80th percentiles
+        def percentile(data, p):
+            n = len(data)
+            if n == 0:
+                return 0
+            k = (n - 1) * p
+            f = int(k)
+            c = k - f
+            if f + 1 < n:
+                return data[f] + c * (data[f + 1] - data[f])
+            else:
+                return data[f]
+        
+        p50 = percentile(revenues, 0.5)
+        p80 = percentile(revenues, 0.8)
+        
+        # Step 3: Segment clients into tiers
+        tiers = {
+            'Top 20%': {'count': 0, 'total': 0.0, 'clients': []},
+            'Mid-tier': {'count': 0, 'total': 0.0, 'clients': []},
+            'Low-value': {'count': 0, 'total': 0.0, 'clients': []}
+        }
+        
+        for client_rev in client_revenues:
+            revenue = float(client_rev.total_revenue)
+            if revenue >= p80:
+                tier = 'Top 20%'
+            elif revenue >= p50:
+                tier = 'Mid-tier'
+            else:
+                tier = 'Low-value'
+            
+            tiers[tier]['count'] += 1
+            tiers[tier]['total'] += revenue
+            tiers[tier]['clients'].append({
+                'name': client_rev.client_name,
+                'revenue': round(revenue, 2)
+            })
+        
+        # Step 4: Format response
+        result = []
+        tier_order = ['Top 20%', 'Mid-tier', 'Low-value']
+        for tier_name in tier_order:
+            tier_data = tiers[tier_name]
+            avg_revenue = tier_data['total'] / tier_data['count'] if tier_data['count'] > 0 else 0
+            
+            # Sort clients by revenue descending within each tier
+            sorted_clients = sorted(tier_data['clients'], key=lambda x: x['revenue'], reverse=True)
+            
+            result.append({
+                "tier": tier_name,
+                "clientCount": tier_data['count'],
+                "totalRevenue": round(tier_data['total'], 2),
+                "avgRevenue": round(avg_revenue, 2),
+                "clients": sorted_clients
+            })
+        
+        return jsonify({"tiers": result})
+    
+    except Exception as e:
+        current_app.logger.error(f"Error in client-revenue-tiers API: {e}")
+        return jsonify({"error": str(e)}), 500
