@@ -4,7 +4,7 @@ from sqlalchemy import text
 from app import cache
 
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
@@ -22,7 +22,7 @@ from sqlalchemy import func, case, desc, or_
 from . import db
 from .models import FactShift, DimClient, DimDate, FinancialMetric
 from .auth import admin_required, manager_required
-from .models import FactShift, DimEmployee, DimClient, DimJob, DimDate, DimShift
+from .models import FactShift, DimEmployee, DimClient, DimJob, DimDate, DimShift, ShiftTarget
 from .utils.data_loader import dbDataLoader
 
 main_bp = Blueprint("main", __name__)
@@ -74,6 +74,72 @@ def api_dashboard_breakdown():
         
         if not start or not end:
             return jsonify({"error": "Start and end dates are required"}), 400
+
+        if metric == 'targetAchievement':
+            if dimension == 'client':
+                return jsonify([])
+
+            # Convert string dates if needed
+            try:
+                # Ensure they are YYYY-MM-DD for consistency
+                datetime.strptime(start, '%Y-%m-%d')
+                datetime.strptime(end, '%Y-%m-%d')
+            except:
+                pass # Use as is if valid or let query fail gracefully
+
+            # 1. Actuals
+            group_col = DimJob.site if dimension == 'site' else DimJob.location
+            actuals_query = db.session.query(
+                group_col.label('name'),
+                func.count(FactShift.shift_record_id).label('val')
+            ).join(DimJob, FactShift.job_id == DimJob.job_id)\
+             .join(DimDate, FactShift.date_id == DimDate.date_id)\
+             .filter(DimDate.date >= start, DimDate.date <= end)
+
+            # RBAC for Actuals
+            if current_user.role != 'admin':
+                if current_user.location:
+                    actuals_query = actuals_query.filter(DimJob.location == current_user.location)
+                if current_user.site:
+                    actuals_query = actuals_query.filter(DimJob.site == current_user.site)
+            
+            actuals = actuals_query.group_by(group_col).all()
+            actual_map = {r.name: r.val for r in actuals if r.name}
+
+            # 2. Targets
+            dates_q = db.session.query(DimDate.year, DimDate.month)\
+                .filter(DimDate.date >= start, DimDate.date <= end)\
+                .distinct().all()
+            
+            target_map = {}
+            if dates_q:
+                for year, month in dates_q:
+                    q = ShiftTarget.query.filter_by(year=year, month=month)
+                    if current_user.role != 'admin':
+                        if current_user.location:
+                             q = q.filter_by(location=current_user.location)
+                        if current_user.site:
+                             q = q.filter_by(site=current_user.site)
+                    
+                    for t in q.all():
+                        key = t.site if dimension == 'site' else t.location
+                        if key:
+                            target_map[key] = target_map.get(key, 0) + t.target_count
+
+            # 3. Merge
+            data = []
+            all_keys = set(actual_map.keys()) | set(target_map.keys())
+            for k in all_keys:
+                act = actual_map.get(k, 0)
+                tgt = target_map.get(k, 0)
+                if tgt > 0:
+                    pct = (act / tgt) * 100
+                    data.append({"name": k, "value": round(pct, 1), "actual": act, "target": tgt})
+                elif act > 0:
+                    data.append({"name": k, "value": 100.0, "actual": act, "target": 0})
+            
+            data.sort(key=lambda x: x['value'], reverse=True)
+            return jsonify(data[:limit])
 
         # Base query setup
         if dimension == 'location':
@@ -1567,4 +1633,789 @@ def api_client_workload_scatter():
     
     except Exception as e:
         current_app.logger.error(f"Error in client-workload-scatter API: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/dashboard/shifts-heatmap")
+@login_required
+def api_shifts_heatmap():
+    """
+    Get shift density heatmap data.
+    Supports two views: calendar (day-by-day) and location_day (location × day grid).
+    """
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        view_type = request.args.get("view_type", "calendar")
+        
+        if not start or not end:
+            return jsonify({"error": "Missing start/end date parameters"}), 400
+        
+        # Get filters
+        locations = request.args.getlist("locations")
+        sites = request.args.getlist("sites")
+        
+        if view_type == "location_day":
+            # Location × Day heatmap
+            query = db.session.query(
+                DimDate.date,
+                DimJob.location,
+                func.count(FactShift.shift_record_id).label('shift_count')
+            ).select_from(FactShift)\
+            .join(DimDate, FactShift.date_id == DimDate.date_id)\
+            .join(DimJob, FactShift.job_id == DimJob.job_id)\
+            .filter(
+                DimDate.date >= start,
+                DimDate.date <= end
+            )
+            
+            # Apply filters
+            if locations:
+                query = query.filter(DimJob.location.in_(locations))
+            if sites:
+                query = query.filter(DimJob.site.in_(sites))
+            
+            # RBAC: Filter by user's locations if not admin
+            if current_user.role != 'admin':
+                try:
+                    import json
+                    user_locations = json.loads(current_user.location) if current_user.location else []
+                    if user_locations:
+                        query = query.filter(DimJob.location.in_(user_locations))
+                except Exception as e:
+                    current_app.logger.error(f"RBAC error in shifts-heatmap: {e}")
+            
+            query = query.group_by(DimDate.date, DimJob.location).order_by(DimDate.date, DimJob.location)
+            results = query.all()
+            
+            # Get unique locations and dates for frontend grid
+            unique_locations = sorted(list(set([r.location for r in results if r.location])))
+            unique_dates = sorted(list(set([str(r.date) for r in results])))
+            
+            data = []
+            for r in results:
+                data.append({
+                    "date": str(r.date),
+                    "location": r.location,
+                    "shift_count": int(r.shift_count)
+                })
+            
+            return jsonify({
+                "view_type": "location_day",
+                "locations": unique_locations,
+                "dates": unique_dates,
+                "data": data
+            })
+        
+        else:
+            # Calendar view (day-by-day)
+            query = db.session.query(
+                DimDate.date,
+                DimDate.day,
+                func.count(FactShift.shift_record_id).label('shift_count')
+            ).select_from(FactShift)\
+            .join(DimDate, FactShift.date_id == DimDate.date_id)\
+            .filter(
+                DimDate.date >= start,
+                DimDate.date <= end
+            )
+            
+            # Apply filters if location/site specified
+            if locations or sites:
+                query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+                if locations:
+                    query = query.filter(DimJob.location.in_(locations))
+                if sites:
+                    query = query.filter(DimJob.site.in_(sites))
+            
+            # RBAC: Filter by user's locations if not admin
+            if current_user.role != 'admin':
+                if not (locations or sites):
+                    query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+                
+                try:
+                    import json
+                    user_locations = json.loads(current_user.location) if current_user.location else []
+                    if user_locations:
+                        query = query.filter(DimJob.location.in_(user_locations))
+                except Exception as e:
+                    current_app.logger.error(f"RBAC error in shifts-heatmap: {e}")
+            
+            query = query.group_by(DimDate.date, DimDate.day).order_by(DimDate.date)
+            results = query.all()
+            
+            data = []
+            for r in results:
+                data.append({
+                    "date": str(r.date),
+                    "day_of_week": r.day,
+                    "shift_count": int(r.shift_count)
+                })
+            
+            return jsonify({
+                "view_type": "calendar",
+                "data": data
+            })
+    
+    except Exception as e:
+        current_app.logger.error(f"Error in shifts-heatmap API: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/dashboard/hours-distribution")
+@login_required
+def api_hours_distribution():
+    """
+    Get distribution statistics (box plot data) for hours worked.
+    Returns Min, Q1, Median, Q3, Max, and Outliers for selected dimension.
+    """
+    try:
+        start = request.args.get("start")
+        end = request.args.get("end")
+        dimension = request.args.get("dimension", "client")  # client, site, staff
+        limit = int(request.args.get("limit", 20))
+        
+        if not start or not end:
+            return jsonify({"error": "Missing start/end date parameters"}), 400
+            
+        # Select appropriate grouping column and joins
+        query = db.session.query(FactShift.paid_hours).join(DimDate, FactShift.date_id == DimDate.date_id)
+        
+        if dimension == 'client':
+            group_col = DimClient.client_name
+            name_label = 'Client'
+            query = query.add_columns(group_col.label('entity'))
+            query = query.join(DimClient, FactShift.client_id == DimClient.client_id)
+            # Need DimJob for filters potentially
+            query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            
+        elif dimension == 'site':
+            group_col = DimJob.site
+            name_label = 'Site'
+            query = query.add_columns(group_col.label('entity'))
+            query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            
+        elif dimension == 'staff':
+            group_col = DimEmployee.full_name
+            name_label = 'Staff'
+            query = query.add_columns(group_col.label('entity'))
+            query = query.join(DimEmployee, FactShift.employee_id == DimEmployee.employee_id)
+            # Join DimJob for location filters
+            query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+        else:
+            return jsonify({"error": "Invalid dimension"}), 400
+            
+        query = query.filter(
+            DimDate.date >= start,
+            DimDate.date <= end,
+            FactShift.paid_hours > 0
+        )
+        
+        # Apply filters
+        query = apply_dashboard_filters(query)
+        
+        # Fetch all data
+        results = query.all()
+        
+        # Process in Python (pandas is better for quartiles/outliers)
+        import pandas as pd
+        import numpy as np
+        
+        if not results:
+            return jsonify([])
+            
+        # Results will be tuples like (hours, entity) due to add_columns
+        # Note: query(FactShift.hours).add_columns(...) results in (hours, entity)
+        # But let's be safe and check structure or use named tuples if possible, 
+        # but standardized sqlalchemy result rows work fine.
+        
+        data_list = [{'hours': r[0], 'entity': r[1]} for r in results if r[1] is not None]
+            
+        if not data_list:
+            return jsonify([])
+
+        df = pd.DataFrame(data_list)
+        df['hours'] = pd.to_numeric(df['hours'])
+        
+        # Group by entity
+        grouped = df.groupby('entity')['hours'].apply(list).reset_index()
+        
+        # Calculate stats
+        check_data = []
+        
+        for _, row in grouped.iterrows():
+            entity = row['entity']
+            values = sorted(row['hours'])
+            
+            if not values:
+                continue
+                
+            q1 = np.percentile(values, 25)
+            median = np.percentile(values, 50)
+            q3 = np.percentile(values, 75)
+            # Box plot min/max (usually 1.5*IQR)
+            iqr = q3 - q1
+            lower_bound = q1 - (1.5 * iqr)
+            upper_bound = q3 + (1.5 * iqr)
+            
+            # Find actual min/max within bounds
+            non_outliers = [v for v in values if v >= lower_bound and v <= upper_bound]
+            min_val = min(non_outliers) if non_outliers else q1
+            max_val = max(non_outliers) if non_outliers else q3
+            
+            # Identify outliers
+            outliers = [v for v in values if v < lower_bound or v > upper_bound]
+            
+            # Calculate total hours for sorting
+            total_hours = sum(values)
+            
+            check_data.append({
+                "name": entity,
+                "min": float(min_val),
+                "q1": float(q1),
+                "median": float(median),
+                "q3": float(q3),
+                "max": float(max_val),
+                "outliers": [float(o) for o in outliers],
+                "total_hours": float(total_hours),
+                "count": len(values)
+            })
+            
+        # Sort by median hours desc and take top N
+        check_data.sort(key=lambda x: x['median'], reverse=True)
+        return jsonify(check_data[:limit])
+        
+    except Exception as e:
+        current_app.logger.error(f"Error in hours-distribution API: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+@main_bp.route("/api/dashboard/target-achievement-bullet")
+@login_required
+def api_target_achievement_bullet():
+    try:
+        start_date_str = request.args.get('start', type=str)
+        end_date_str = request.args.get('end', type=str)
+        dimension = request.args.get('dimension', 'site')
+        limit = request.args.get('limit', 15, type=int)
+
+        if not start_date_str or not end_date_str:
+            # Default to current month
+            now = datetime.now()
+            start_date = datetime(now.year, now.month, 1)
+            end_date = now
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
+        else:
+            try:
+                datetime.strptime(start_date_str, '%Y-%m-%d')
+                datetime.strptime(end_date_str, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        # Determine Grouping
+        if dimension == 'client':
+            group_col = DimClient.client_name
+            join_table = DimClient
+            join_cond = FactShift.client_id == DimClient.client_id
+        elif dimension == 'site':
+            group_col = DimJob.site
+            join_table = DimJob
+            join_cond = FactShift.job_id == DimJob.job_id
+        else:
+             return jsonify({"error": "Invalid dimension"}), 400
+
+        # 1. Get Actual Shifts
+        actuals_query = db.session.query(
+            group_col.label('name'),
+            func.count(FactShift.shift_record_id).label('actual_count')
+        ).join(join_table, join_cond)\
+         .join(DimDate, FactShift.date_id == DimDate.date_id)\
+         .filter(DimDate.date >= start_date_str, DimDate.date <= end_date_str)
+        
+        # RBAC and Join for Client dimension if not Admin
+        if current_user.role != 'admin':
+            # Ensure DimJob is joined for location/site filtering
+            if dimension == 'client':
+                actuals_query = actuals_query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            
+            if current_user.location:
+                actuals_query = actuals_query.filter(DimJob.location == current_user.location)
+            if current_user.site:
+                actuals_query = actuals_query.filter(DimJob.site == current_user.site)
+
+        actuals = actuals_query.group_by(group_col).all()
+        actual_map = {r.name: r.actual_count for r in actuals if r.name}
+
+        # 2. Get Targets (Only for Site)
+        target_map = {}
+        if dimension == 'site':
+            dates = db.session.query(DimDate.year, DimDate.month)\
+                .filter(DimDate.date >= start_date_str, DimDate.date <= end_date_str)\
+                .distinct().all()
+            
+            if dates:
+                for year, month in dates:
+                    targets_query = ShiftTarget.query.filter_by(year=year, month=month)
+                    if current_user.role != 'admin':
+                        if current_user.location:
+                             targets_query = targets_query.filter_by(location=current_user.location)
+                        if current_user.site:
+                             targets_query = targets_query.filter_by(site=current_user.site)
+                    
+                    for t in targets_query.all():
+                        site_name = t.site
+                        if not site_name: continue
+                        target_map[site_name] = target_map.get(site_name, 0) + t.target_count
+
+        # 3. Merge and Format
+        results = []
+        all_keys = set(actual_map.keys()) | set(target_map.keys())
+        
+        for key in all_keys:
+            if not key: continue
+
+            actual = actual_map.get(key, 0)
+            target = target_map.get(key, 0)
+            
+            if actual == 0 and target == 0:
+                continue
+            
+            if target == 0:
+                achievement = 100 if actual > 0 else 0
+                calc_reference = actual if actual > 0 else 100
+            else:
+                achievement = (actual / target) * 100
+                calc_reference = target
+
+            range_poor = calc_reference * 0.8
+            range_good = calc_reference * 0.15 
+            range_excellent = calc_reference * 0.30
+
+            results.append({
+                "name": key,
+                "actual": actual,
+                "target": target,
+                "achievement": round(achievement, 1),
+                "range_poor": range_poor,
+                "range_good": range_good,
+                "range_excellent": range_excellent, 
+                "marker": target 
+            })
+            
+        # Sort by Actual desc
+        results.sort(key=lambda x: x['actual'], reverse=True)
+        
+        return jsonify(results[:limit])
+
+    except Exception as e:
+        current_app.logger.error(f"Error in target achievement: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@main_bp.route("/api/dashboard/revenue-waterfall")
+@login_required
+def api_revenue_waterfall():
+    try:
+        start_date_str = request.args.get('start', type=str)
+        end_date_str = request.args.get('end', type=str)
+        
+        if not start_date_str or not end_date_str:
+             return jsonify({"error": "Start and End dates required"}), 400
+
+        try:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "Invalid date format"}), 400
+
+        # Calculate Previous Period
+        duration = end_date - start_date
+        # Simple Logic: Previous period is same duration ending on start_date - 1 day
+        prev_end = start_date - timedelta(days=1)
+        prev_start = prev_end - duration
+        
+        prev_start_str = prev_start.strftime('%Y-%m-%d')
+        prev_end_str = prev_end.strftime('%Y-%m-%d')
+
+        def get_client_revenue(s_date, e_date):
+            query = db.session.query(
+                FactShift.client_id,
+                func.sum(FactShift.client_net).label('revenue')
+            ).join(DimDate, FactShift.date_id == DimDate.date_id)\
+             .filter(DimDate.date >= s_date, DimDate.date <= e_date)
+            
+            # RBAC
+            if current_user.role != 'admin':
+                query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+                if current_user.location:
+                    query = query.filter(DimJob.location == current_user.location)
+                if current_user.site:
+                    query = query.filter(DimJob.site == current_user.site)
+            
+            # Apply Request Filters
+            req_locations = request.args.getlist('locations')
+            req_sites = request.args.getlist('sites')
+            
+            if req_locations or req_sites:
+                # If not already joined DimJob (e.g. admin)
+                is_admin = current_user.role == 'admin'
+                has_joined_job = not is_admin 
+                
+                if not has_joined_job: 
+                     query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+                
+                if req_locations:
+                    query = query.filter(DimJob.location.in_(req_locations))
+                if req_sites:
+                    query = query.filter(DimJob.site.in_(req_sites))
+
+            return {row.client_id: float(row.revenue or 0) for row in query.group_by(FactShift.client_id).all()}
+
+        prev_rev_map = get_client_revenue(prev_start_str, prev_end_str)
+        curr_rev_map = get_client_revenue(start_date_str, end_date_str)
+
+        starting_rev = sum(prev_rev_map.values())
+        ending_rev = sum(curr_rev_map.values())
+
+        new_clients_rev = 0
+        lost_clients_rev = 0
+        net_movement_rev = 0
+
+        all_clients = set(prev_rev_map.keys()) | set(curr_rev_map.keys())
+
+        for client_id in all_clients:
+            prev = prev_rev_map.get(client_id, 0)
+            curr = curr_rev_map.get(client_id, 0)
+
+            if prev == 0 and curr > 0:
+                new_clients_rev += curr
+            elif prev > 0 and curr == 0:
+                lost_clients_rev += prev # Magnitude of loss
+            elif prev > 0 and curr > 0:
+                net_movement_rev += (curr - prev)
+        
+        # Format for Waterfall
+        # Order: Starting, New (+), Lost (-), Net (+/-), Ending
+        
+        data = [
+            {"name": "Starting Revenue", "value": starting_rev, "type": "start"},
+            {"name": "New Clients", "value": new_clients_rev, "type": "plus"},
+            {"name": "Lost Clients", "value": -lost_clients_rev, "type": "minus"},
+            {"name": "Net Movement", "value": net_movement_rev, "type": "plus" if net_movement_rev >= 0 else "minus"},
+            {"name": "Ending Revenue", "value": ending_rev, "type": "total"}
+        ]
+
+        return jsonify(data)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"DEBUG ERROR in revenue-waterfall: {e}", flush=True)
+        current_app.logger.error(f"Error in revenue-waterfall: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@main_bp.route("/api/dashboard/client-margin-treemap")
+@login_required
+def api_client_margin_treemap():
+    try:
+        start_date_str = request.args.get('start', type=str)
+        end_date_str = request.args.get('end', type=str)
+        
+        if not start_date_str or not end_date_str:
+             return jsonify({"error": "Start and End dates required"}), 400
+
+        # Query
+        query = db.session.query(
+            DimClient.client_name,
+            func.sum(FactShift.client_net).label('revenue'),
+            func.sum(FactShift.total_pay).label('cost')
+        ).join(DimClient, FactShift.client_id == DimClient.client_id)\
+         .join(DimDate, FactShift.date_id == DimDate.date_id)\
+         .filter(DimDate.date >= start_date_str, DimDate.date <= end_date_str)
+
+        # RBAC
+        if current_user.role != 'admin':
+            query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            if current_user.location:
+                query = query.filter(DimJob.location == current_user.location)
+            if current_user.site:
+                query = query.filter(DimJob.site == current_user.site)
+        
+        # Apply Request Filters
+        req_locations = request.args.getlist('locations')
+        req_sites = request.args.getlist('sites')
+        
+        target_metric = request.args.get('metric', 'revenue') # 'revenue' or 'cost'
+        
+        if req_locations or req_sites:
+            # If not already joined DimJob
+            if current_user.role == 'admin': 
+                    query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+            
+            if req_locations:
+                query = query.filter(DimJob.location.in_(req_locations))
+            if req_sites:
+                query = query.filter(DimJob.site.in_(req_sites))
+
+        results = query.group_by(DimClient.client_name).all()
+
+        data = []
+        for r in results:
+            revenue = float(r.revenue or 0)
+            cost = float(r.cost or 0)
+            profit = revenue - cost
+            margin = (profit / revenue * 100) if revenue > 0 else 0
+            
+            # Determine size based on selected metric
+            size_val = cost if target_metric == 'cost' else revenue
+
+            if size_val > 0: # Only show clients with value > 0
+                data.append({
+                    "name": r.client_name,
+                    "size": size_val, 
+                    "revenue": revenue,
+                    "cost": cost,
+                    "profit": profit,
+                    "margin": round(margin, 1)
+                })
+        
+        # Sort by size desc
+        data.sort(key=lambda x: x['size'], reverse=True)
+
+        return jsonify(data)
+
+    except Exception as e:
+        current_app.logger.error(f"Error in client-margin-treemap: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/dashboard/profit-variance", methods=["GET"])
+@login_required
+def api_profit_variance():
+    """
+    Returns Monthly Actual Profit vs Target Profit.
+    Actual Profit = Sum(Client Net) - Sum(Total Pay) from FactShift.
+    Target Profit = Value from FinancialMetric where name is 'Profit Target' (or 'Net Profit Budget').
+    """
+    try:
+        start_date_str = request.args.get('start')
+        end_date_str = request.args.get('end')
+        
+        if not start_date_str or not end_date_str:
+            return jsonify({"error": "Start and End dates required"}), 400
+
+        # 1. Calculate Actual Profit by Month
+        query = db.session.query(
+            DimDate.year,
+            DimDate.month,
+            func.sum(FactShift.client_net).label('revenue'),
+            func.sum(FactShift.total_pay).label('cost')
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        ).filter(
+            DimDate.date >= start_date_str,
+            DimDate.date <= end_date_str
+        )
+        
+        # RBAC and Filters
+        req_locations = request.args.getlist('locations')
+        req_sites = request.args.getlist('sites')
+        
+        if req_locations or req_sites or (current_user.role != 'admin' and current_user.location):
+             query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+             
+             if current_user.role != 'admin' and current_user.location:
+                # Basic RBAC for now
+                query = query.filter(DimJob.location == current_user.location)
+             
+             if req_locations:
+                 query = query.filter(DimJob.location.in_(req_locations))
+             if req_sites:
+                 query = query.filter(DimJob.site.in_(req_sites))
+                 
+        actuals = query.group_by(DimDate.year, DimDate.month).all()
+        
+        actual_map = {} # Key: "YYYY-MonthName"
+        for r in actuals:
+            rev = r.revenue or 0
+            cost = r.cost or 0
+            profit = rev - cost
+            key = f"{r.year}-{r.month}"
+            actual_map[key] = profit
+
+        # 2. Fetch Targets from FinancialMetric
+        # Assuming we look for a metric named "Profit Target" or similar.
+        # We need to filter by year range.
+        try:
+            start_year = int(start_date_str[:4])
+        except:
+            start_year = datetime.now().year
+
+        target_query = FinancialMetric.query.filter(
+            FinancialMetric.year >= start_year,
+            FinancialMetric.name.ilike('%Profit Target%') # Flexible matching
+        )
+        
+        # Apply filters to targets too?
+        # FinancialMetric has location/site.
+        if req_locations:
+            target_query = target_query.filter(FinancialMetric.location.in_(req_locations))
+        elif current_user.role != 'admin' and current_user.location:
+             target_query = target_query.filter(FinancialMetric.location == current_user.location)
+             
+        targets = target_query.all()
+        
+        target_map = {}
+        for t in targets:
+            key = f"{t.year}-{t.month}"
+            # Sum targets if multiple entries (e.g. multiple sites)
+            target_map[key] = target_map.get(key, 0) + (t.value or 0)
+            
+        # 3. Combine Data
+        # We need a list of all relevant months.
+        # Let's iterate through actuals and targets to build a complete list.
+        all_keys = set(actual_map.keys()) | set(target_map.keys())
+        
+        data = []
+        months_order = ["January", "February", "March", "April", "May", "June", 
+                        "July", "August", "September", "October", "November", "December"]
+
+        for key in all_keys:
+            parts = key.split('-')
+            year = int(parts[0])
+            month = parts[1]
+            
+            actual = actual_map.get(key, 0)
+            target = target_map.get(key, 0) # Default to 0 if not set
+            variance = actual - target
+            
+            data.append({
+                "year": year,
+                "month": month,
+                "display": f"{month[:3]} {year}",
+                "actual": actual,
+                "target": target,
+                "variance": variance,
+                "variancePercent": (variance / target * 100) if target > 0 else 0
+            })
+            
+        # Sort
+        data.sort(key=lambda x: (x['year'], months_order.index(x['month']) if x['month'] in months_order else 0))
+        
+        return jsonify(data)
+
+    except Exception as e:
+        current_app.logger.error(f"Error in profit-variance: {e}")
+        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
+
+@main_bp.route("/api/financial-summary/save", methods=["POST"])
+@login_required
+def api_save_financial_summary():
+    """
+    Saves financial summary data.
+    Expected JSON:
+    {
+        "year": 2025,
+        "data": {
+            "row_id": { "col_id": value, ... },
+            ...
+        },
+        "custom_rows": [ { "id": "...", "label": "..." }, ... ]
+    }
+    """
+    try:
+        payload = request.get_json()
+        year = payload.get('year', datetime.now().year)
+        data = payload.get('data', {})
+        custom_rows = payload.get('custom_rows', [])
+        
+        # 1. Update FinancialMetric values
+        # We process 'data' to find values for each row/month
+        # Assuming row_id maps to metric name, col_id maps to month (jan, feb, ...)
+        
+        month_map = {
+            "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+            "may": "May", "jun": "June", "jul": "July", "aug": "August",
+            "sep": "September", "oct": "October", "nov": "November", "dec": "December",
+            # Year end might be calculated, usually not saved as a separate metric entry unless specified
+        }
+
+        # Clear existing metrics for this year? Or just functionality to update/upsert?
+        # For now, let's upsert based on (name, year, month, location)
+        # Assuming global location for simplicity unless passed in request
+        
+        # We need a mapping from row_id to metric name. 
+        # If it's a default row, we use a known map? Or just use the label?
+        # Let's use the label passed from frontend (we might need to send row definitions)
+        
+        # Ideally, frontend sends: [ { name: "Total Sales", month: "January", value: 123 }, ... ]
+        # But here we receive the matrix.
+        
+        # Let's trust the frontend to send a structured list of metrics to save?
+        # Or parse the matrix.
+        
+        # Simplified approach: Frontend sends list of metrics to upsert.
+        # But the payload structure in docstring says 'data' matrix.
+        
+        # Let's act on the payload.
+        # We need row labels. 
+        # The 'custom_rows' tells us about new rows, but what about default rows?
+        # The frontend should probably send `rows` config in payload.
+        
+        rows_config = payload.get('rows', [])
+        row_label_map = { r['id']: r['label'] for r in rows_config }
+        
+        changes_count = 0
+        
+        for row_id, cols in data.items():
+            metric_name = row_label_map.get(row_id)
+            if not metric_name: continue
+            
+            # recursive dictionary in payload? data[row_id][col_id] = { value: ... }
+            for col_id, cell_data in cols.items():
+                if col_id not in month_map: continue
+                
+                try:
+                    val = cell_data.get('value')
+                    if val is None: continue
+                    val = float(val)
+                except:
+                    continue
+                    
+                month_name = month_map[col_id]
+                
+                # Find or create metric
+                metric = FinancialMetric.query.filter_by(
+                    name=metric_name,
+                    year=year,
+                    month=month_name,
+                    # Location/Site? defaulting to None (Global) or current user?
+                    # Let's assume Global for "Financial Summary" unless specified
+                    location=None, 
+                    site=None
+                ).first()
+                
+                if metric:
+                    metric.value = val
+                else:
+                    metric = FinancialMetric(
+                        name=metric_name,
+                        value=val,
+                        year=year,
+                        month=month_name,
+                        metric_type='financial', # generic type
+                        location=None,
+                        site=None
+                    )
+                    db.session.add(metric)
+                changes_count += 1
+                
+        db.session.commit()
+        
+        return jsonify({"message": "Saved successfully", "changes": changes_count})
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error saving financial summary: {e}")
         return jsonify({"error": str(e)}), 500

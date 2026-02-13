@@ -497,12 +497,12 @@ class dbDataLoader:
         original_count = len(df)
         
         # Filter out excluded locations (case-insensitive)
-        if 'location' in df.columns:
-            df = df[~df['location'].fillna('').str.upper().isin([loc.upper() for loc in self.EXCLUDED_LOCATIONS])]
+        if 'location' in df.columns and self.excluded_locations:
+            df = df[~df['location'].fillna('').str.upper().isin([loc.upper() for loc in self.excluded_locations])]
         
         # Filter out excluded clients (case-insensitive)
-        if 'client' in df.columns:
-            df = df[~df['client'].fillna('').str.upper().isin([client.upper() for client in self.EXCLUDED_CLIENTS])]
+        if 'client' in df.columns and self.excluded_clients:
+            df = df[~df['client'].fillna('').str.upper().isin([client.upper() for client in self.excluded_clients])]
         
         filtered_count = original_count - len(df)
         return df, filtered_count
