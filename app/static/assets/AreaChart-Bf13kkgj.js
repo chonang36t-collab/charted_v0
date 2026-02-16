@@ -1,0 +1,1 @@
+import{a2 as a,A as s,X as r,Y as i,a3 as x}from"./generateCategoricalChart-CEUHAL_a.js";var e=a({chartName:"AreaChart",GraphicalChild:s,axisComponents:[{axisType:"xAxis",AxisComp:r},{axisType:"yAxis",AxisComp:i}],formatAxisMap:x});export{e as A};

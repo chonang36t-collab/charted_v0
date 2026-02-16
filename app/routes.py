@@ -2309,6 +2309,76 @@ def api_profit_variance():
         return jsonify({"error": str(e)}), 500
         return jsonify({"error": str(e)}), 500
 
+@main_bp.route("/api/financial-summary/metrics", methods=["GET"])
+@login_required
+def api_financial_summary_metrics():
+    """
+    Returns aggregated financial metrics for the summary table.
+    - Total Sales (SUM(client_net))
+    - Cost of Sales PAYE Gross (SUM(total_pay))
+    Grouped by Month.
+    """
+    try:
+        start_date_str = request.args.get('start')
+        end_date_str = request.args.get('end')
+
+        if not start_date_str or not end_date_str:
+             return jsonify({"error": "Start and End dates required"}), 400
+
+        # Query FactShifts
+        query = db.session.query(
+            DimDate.year,
+            DimDate.month,
+            func.sum(FactShift.client_net).label('total_sales'),
+            func.sum(FactShift.total_pay).label('cost_sales_paye')
+        ).join(
+            DimDate, FactShift.date_id == DimDate.date_id
+        ).filter(
+            DimDate.date >= start_date_str,
+            DimDate.date <= end_date_str
+        )
+
+        # RBAC and Filters
+        # (Reusing logic from other endpoints)
+        if current_user.role != 'admin':
+             query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+             if current_user.location:
+                 query = query.filter(DimJob.location == current_user.location)
+             if current_user.site:
+                 query = query.filter(DimJob.site == current_user.site)
+        
+        # Apply Request Filters if any (though usually this page is high-level)
+        # keeping it consistent with other dashboards just in case
+        req_locations = request.args.getlist('locations')
+        req_sites = request.args.getlist('sites')
+
+        if req_locations or req_sites:
+             # Check if we need to join DimJob (if admin didn't already)
+             if current_user.role == 'admin':
+                 query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
+             
+             if req_locations:
+                 query = query.filter(DimJob.location.in_(req_locations))
+             if req_sites:
+                 query = query.filter(DimJob.site.in_(req_sites))
+
+        results = query.group_by(DimDate.year, DimDate.month).all()
+
+        data = {}
+        for r in results:
+            key = f"{r.year}-{r.month}" # e.g. "2025-January"
+            data[key] = {
+                "total_sales": float(r.total_sales or 0),
+                "cost_sales_paye": float(r.cost_sales_paye or 0)
+            }
+
+        return jsonify(data)
+
+    except Exception as e:
+        current_app.logger.error(f"Error in financial-summary/metrics: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @main_bp.route("/api/financial-summary/save", methods=["POST"])
 @login_required
 def api_save_financial_summary():
