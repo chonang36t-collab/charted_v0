@@ -2329,23 +2329,23 @@ def api_financial_summary_metrics():
         query = db.session.query(
             DimDate.year,
             DimDate.month,
-            func.sum(FactShift.client_net).label('total_sales'),
-            func.sum(FactShift.total_pay).label('cost_sales_paye')
+            func.sum(FactShift.client_net).label('revenue'),
+            func.sum(case((FactShift.self_employed == True, FactShift.total_pay), else_=0)).label('cost_se'),
+            func.sum(case((FactShift.self_employed == False, FactShift.total_pay), else_=0)).label('cost_paye'),
+            func.sum(FactShift.paid_hours).label('total_hours')
         ).join(
             DimDate, FactShift.date_id == DimDate.date_id
         ).filter(
             DimDate.date >= start_date_str,
             DimDate.date <= end_date_str
         )
-
-        # RBAC and Filters
-        # (Reusing logic from other endpoints)
-        if current_user.role != 'admin':
+        
+        # RBAC
+        if current_user.role != 'admin' and current_user.location:
              query = query.join(DimJob, FactShift.job_id == DimJob.job_id)
-             if current_user.location:
-                 query = query.filter(DimJob.location == current_user.location)
-             if current_user.site:
-                 query = query.filter(DimJob.site == current_user.site)
+             query = query.filter(DimJob.location == current_user.location)
+             
+
         
         # Apply Request Filters if any (though usually this page is high-level)
         # keeping it consistent with other dashboards just in case
@@ -2363,15 +2363,30 @@ def api_financial_summary_metrics():
                  query = query.filter(DimJob.site.in_(req_sites))
 
         results = query.group_by(DimDate.year, DimDate.month).all()
-
+        
         data = {}
         for r in results:
-            key = f"{r.year}-{r.month}" # e.g. "2025-January"
-            data[key] = {
-                "total_sales": float(r.total_sales or 0),
-                "cost_sales_paye": float(r.cost_sales_paye or 0)
-            }
+            # key: "2025-January"
+            # We need month name. DimDate.month is integer.
+            # We need month name. DimDate.month might be 'January' or '1'
+            m_val = r.month
+            try:
+                # Try to convert to int if it looks like a number
+                m_int = int(m_val)
+                month_name = datetime(2000, m_int, 1).strftime('%B')
+            except (ValueError, TypeError):
+                # It's likely already a string name like "January"
+                month_name = str(m_val) if m_val else "Unknown"
 
+            key = f"{r.year}-{month_name}"
+            
+            data[key] = {
+                "total_sales": float(r.revenue or 0),
+                "cost_sales_se": float(r.cost_se or 0),
+                "cost_sales_paye": float(r.cost_paye or 0),
+                "total_hours": float(r.total_hours or 0)
+            }
+        
         return jsonify(data)
 
     except Exception as e:

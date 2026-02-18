@@ -128,7 +128,8 @@ def api_records():
                 "hourRate": float(fact.hour_rate or 0) if is_admin else None,
                 "clientHourlyRate": float(fact.client_hourly_rate or 0) if is_admin else None,
                 "jobStatus": fact.job_status,
-                "jobName": fact.job.job_name if fact.job else "" 
+                "jobName": fact.job.job_name if fact.job else "",
+                "selfEmployed": fact.self_employed
             }
             data.append(item)
             
