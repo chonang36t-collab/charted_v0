@@ -162,3 +162,18 @@ class FinancialMetric(db.Model):
     site = db.Column(db.String(100), nullable=True)
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class FinancialSummaryOverride(db.Model):
+    """Stores manual cell overrides for the Financial Summary spreadsheet."""
+    __tablename__ = 'financial_summary_overrides'
+
+    id = db.Column(db.Integer, primary_key=True)
+    row_id = db.Column(db.String(100), nullable=False)   # e.g. 'total_sales'
+    col_id = db.Column(db.String(50), nullable=False)    # e.g. 'jan' or 'jan-2025'
+    value = db.Column(db.Float, nullable=True)
+
+    # Composite unique so each (row, col) pair has one stored value
+    __table_args__ = (db.UniqueConstraint('row_id', 'col_id', name='_row_col_uc'),)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

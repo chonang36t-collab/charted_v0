@@ -2504,3 +2504,54 @@ def api_save_financial_summary():
         db.session.rollback()
         current_app.logger.error(f"Error saving financial summary: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ─── Financial Summary Cell Overrides ────────────────────────────────────────
+
+from .models import FinancialSummaryOverride
+
+@main_bp.route("/api/financial-summary/overrides", methods=["GET"])
+@login_required
+def get_financial_summary_overrides():
+    """Return all saved manual cell overrides."""
+    overrides = FinancialSummaryOverride.query.all()
+    return jsonify([
+        {"row_id": o.row_id, "col_id": o.col_id, "value": o.value}
+        for o in overrides
+    ])
+
+
+@main_bp.route("/api/financial-summary/overrides", methods=["POST"])
+@login_required
+def save_financial_summary_override():
+    """Upsert a single cell override (row_id + col_id → value)."""
+    data = request.get_json()
+    row_id = data.get("row_id")
+    col_id = data.get("col_id")
+    value  = data.get("value")   # None means clear the override
+
+    if not row_id or not col_id:
+        return jsonify({"error": "row_id and col_id are required"}), 400
+
+    existing = FinancialSummaryOverride.query.filter_by(row_id=row_id, col_id=col_id).first()
+
+    try:
+        if value is None:
+            # Clear the override
+            if existing:
+                db.session.delete(existing)
+        else:
+            if existing:
+                existing.value = float(value)
+            else:
+                db.session.add(FinancialSummaryOverride(
+                    row_id=row_id,
+                    col_id=col_id,
+                    value=float(value)
+                ))
+        db.session.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error saving override: {e}")
+        return jsonify({"error": str(e)}), 500
